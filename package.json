@@ -1,0 +1,19 @@
+{
+  "name": "pokemon-quiz",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev:client": "cd client && npm run dev",
+    "dev:api": "vercel dev --listen 3000",
+    "dev": "concurrently \"npm run dev:api\" \"npm run dev:client\""
+  },
+  "dependencies": {
+    "ably": "^2.0.0",
+    "@upstash/redis": "^1.28.0"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0",
+    "@vercel/node": "^3.0.0",
+    "typescript": "^5.3.0"
+  }
+}
