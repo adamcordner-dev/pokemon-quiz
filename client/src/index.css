@@ -19,3 +19,129 @@ body {
 * {
   box-sizing: border-box;
 }
+
+/* ---- Layout ---- */
+
+.page-center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 1rem;
+  text-align: center;
+}
+
+/* ---- Buttons ---- */
+
+.btn {
+  display: inline-block;
+  padding: 0.75rem 2rem;
+  border: none;
+  border-radius: 8px;
+  font-size: 1.1rem;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+  text-align: center;
+  transition: background-color 0.2s, transform 0.1s;
+  min-width: 200px;
+}
+
+.btn:hover {
+  transform: scale(1.03);
+}
+
+.btn:active {
+  transform: scale(0.98);
+}
+
+.btn-primary {
+  background-color: #e74c3c;
+  color: #ffffff;
+}
+
+.btn-primary:hover {
+  background-color: #c0392b;
+}
+
+.btn-secondary {
+  background-color: #2d3436;
+  color: #ffffff;
+}
+
+.btn-secondary:hover {
+  background-color: #3d4446;
+}
+
+.button-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  margin-top: 1.5rem;
+}
+
+/* ---- Back Button ---- */
+
+.back-button {
+  background: none;
+  border: none;
+  color: #a0a0b0;
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 0.5rem 1rem;
+  align-self: flex-start;
+}
+
+.back-button:hover {
+  color: #ffffff;
+}
+
+/* ---- Mute Button ---- */
+
+.mute-button {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  z-index: 1000;
+  width: 44px;
+  height: 44px;
+  border: none;
+  border-radius: 8px;
+  background-color: #2d3436;
+  color: #ffffff;
+  font-size: 1.25rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.2s;
+}
+
+.mute-button:hover {
+  background-color: #3d4446;
+}
+
+/* ---- Loading Spinner ---- */
+
+.loading-spinner-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+}
+
+.loading-spinner {
+  width: 48px;
+  height: 48px;
+  border: 4px solid #2d3436;
+  border-top-color: #e74c3c;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
