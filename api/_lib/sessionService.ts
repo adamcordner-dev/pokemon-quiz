@@ -281,6 +281,14 @@ export function submitAnswer(
       throw new Error('Question not found');
     }
 
+    // Anti-cheat: in multiplayer, only allow answering the current question
+    if (session.isMultiplayer) {
+      const currentQ = session.questions[session.currentQuestionIndex];
+      if (currentQ.questionId !== questionId) {
+        throw new Error('Cannot answer a question that is not the current one');
+      }
+    }
+
     // Find the player
     const player = session.players.find((p) => p.playerId === playerId);
     if (!player) {
