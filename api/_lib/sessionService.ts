@@ -5,6 +5,9 @@
 // TODO: Replace with Upstash Redis for production (Phase 15).
 
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 import {
   GameSession,
   GameSettings,
@@ -22,8 +25,39 @@ import {
 import { generateQuestions } from './pokeApiService';
 import { calculateScore } from './scoringService';
 
-// --- In-memory session store ---
-const sessions = new Map<string, GameSession>();
+// --- File-backed session store ---
+// Vercel dev bundles each serverless function separately, so an in-memory
+// Map is NOT shared between endpoints. Instead we persist sessions to a
+// temp JSON file that all functions can read/write.
+// TODO: Replace with Upstash Redis for production (Phase 15).
+
+const STORE_PATH = path.join(os.tmpdir(), 'pokemon-quiz-sessions.json');
+
+function loadSessions(): Map<string, GameSession> {
+  try {
+    if (fs.existsSync(STORE_PATH)) {
+      const raw = fs.readFileSync(STORE_PATH, 'utf-8');
+      const entries: [string, GameSession][] = JSON.parse(raw);
+      return new Map(entries);
+    }
+  } catch {
+    // Corrupted file — start fresh
+  }
+  return new Map();
+}
+
+function saveSessions(sessions: Map<string, GameSession>): void {
+  const entries = Array.from(sessions.entries());
+  fs.writeFileSync(STORE_PATH, JSON.stringify(entries), 'utf-8');
+}
+
+/** Helper: read → mutate → write pattern */
+function withSessions<T>(fn: (sessions: Map<string, GameSession>) => T): T {
+  const sessions = loadSessions();
+  const result = fn(sessions);
+  saveSessions(sessions);
+  return result;
+}
 
 /** Maximum players allowed in a multiplayer room. */
 export const MAX_PLAYERS = 20;
@@ -38,7 +72,7 @@ const ROOM_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 /**
  * Generate a 4-character room code that isn't already in use.
  */
-function generateRoomCode(): string {
+function generateRoomCode(sessions: Map<string, GameSession>): string {
   const MAX_ATTEMPTS = 100;
   const activeCodes = new Set<string>();
 
@@ -103,7 +137,9 @@ export async function createSinglePlayerSession(
     createdAt: Date.now(),
   };
 
-  sessions.set(sessionId, session);
+  withSessions((sessions) => {
+    sessions.set(sessionId, session);
+  });
 
   const clientQuestions: ClientQuestion[] = questions.map(toClientQuestion);
 
@@ -126,22 +162,26 @@ export async function createMultiplayerSession(
   const sessionId = crypto.randomUUID();
   const questions = await generateQuestions(settings);
   const player = createPlayer(playerName, true);
-  const roomCode = generateRoomCode();
 
-  const session: GameSession = {
-    sessionId,
-    questions,
-    currentQuestionIndex: 0,
-    players: [player],
-    status: 'waiting',
-    roomCode,
-    isMultiplayer: true,
-    settings,
-    answeredQuestions: {},
-    createdAt: Date.now(),
-  };
+  const roomCode = withSessions((sessions) => {
+    const code = generateRoomCode(sessions);
 
-  sessions.set(sessionId, session);
+    const session: GameSession = {
+      sessionId,
+      questions,
+      currentQuestionIndex: 0,
+      players: [player],
+      status: 'waiting',
+      roomCode: code,
+      isMultiplayer: true,
+      settings,
+      answeredQuestions: {},
+      createdAt: Date.now(),
+    };
+
+    sessions.set(sessionId, session);
+    return code;
+  });
 
   return {
     sessionId,
@@ -161,40 +201,42 @@ export function joinMultiplayerSession(
   roomCode: string,
   playerName: string
 ): MultiplayerJoinResponse {
-  const upperCode = roomCode.toUpperCase();
+  return withSessions((sessions) => {
+    const upperCode = roomCode.toUpperCase();
 
-  let session: GameSession | undefined;
-  for (const s of sessions.values()) {
-    if (s.roomCode === upperCode && s.status === 'waiting') {
-      session = s;
-      break;
+    let session: GameSession | undefined;
+    for (const s of sessions.values()) {
+      if (s.roomCode === upperCode && s.status === 'waiting') {
+        session = s;
+        break;
+      }
     }
-  }
 
-  if (!session) {
-    throw new Error('Room not found');
-  }
+    if (!session) {
+      throw new Error('Room not found');
+    }
 
-  if (session.players.length >= MAX_PLAYERS) {
-    throw new Error('Room is full (max 20 players)');
-  }
+    if (session.players.length >= MAX_PLAYERS) {
+      throw new Error('Room is full (max 20 players)');
+    }
 
-  const nameTaken = session.players.some(
-    (p) => p.name.toLowerCase() === playerName.toLowerCase()
-  );
-  if (nameTaken) {
-    throw new Error('Name already taken');
-  }
+    const nameTaken = session.players.some(
+      (p) => p.name.toLowerCase() === playerName.toLowerCase()
+    );
+    if (nameTaken) {
+      throw new Error('Name already taken');
+    }
 
-  const player = createPlayer(playerName, false);
-  session.players.push(player);
+    const player = createPlayer(playerName, false);
+    session.players.push(player);
 
-  return {
-    sessionId: session.sessionId,
-    playerId: player.playerId,
-    players: session.players,
-    settings: session.settings,
-  };
+    return {
+      sessionId: session.sessionId,
+      playerId: player.playerId,
+      players: session.players,
+      settings: session.settings,
+    };
+  });
 }
 
 // ---------------------------------------------------------------
@@ -205,6 +247,7 @@ export function joinMultiplayerSession(
  * Retrieve a session by its ID.
  */
 export function getSession(sessionId: string): GameSession | undefined {
+  const sessions = loadSessions();
   return sessions.get(sessionId);
 }
 
@@ -223,68 +266,70 @@ export function submitAnswer(
   selectedIndex: number,
   timeRemainingSeconds: number
 ): AnswerResult {
-  const session = sessions.get(sessionId);
-  if (!session) {
-    throw new Error('Session not found');
-  }
-  if (session.status !== 'active') {
-    throw new Error('Session is not active');
-  }
+  return withSessions((sessions) => {
+    const session = sessions.get(sessionId);
+    if (!session) {
+      throw new Error('Session not found');
+    }
+    if (session.status !== 'active') {
+      throw new Error('Session is not active');
+    }
 
-  // Find the question
-  const question = session.questions.find((q) => q.questionId === questionId);
-  if (!question) {
-    throw new Error('Question not found');
-  }
+    // Find the question
+    const question = session.questions.find((q) => q.questionId === questionId);
+    if (!question) {
+      throw new Error('Question not found');
+    }
 
-  // Find the player
-  const player = session.players.find((p) => p.playerId === playerId);
-  if (!player) {
-    throw new Error('Player not found');
-  }
+    // Find the player
+    const player = session.players.find((p) => p.playerId === playerId);
+    if (!player) {
+      throw new Error('Player not found');
+    }
 
-  // Check for duplicate answer
-  const questionAnswers = session.answeredQuestions[questionId];
-  if (questionAnswers && questionAnswers[playerId]) {
-    throw new Error('Already answered this question');
-  }
+    // Check for duplicate answer
+    const questionAnswers = session.answeredQuestions[questionId];
+    if (questionAnswers && questionAnswers[playerId]) {
+      throw new Error('Already answered this question');
+    }
 
-  // Clamp timeRemaining to valid range (anti-cheat)
-  const clampedTime = Math.max(
-    0,
-    Math.min(timeRemainingSeconds, session.settings.timePerQuestion)
-  );
+    // Clamp timeRemaining to valid range (anti-cheat)
+    const clampedTime = Math.max(
+      0,
+      Math.min(timeRemainingSeconds, session.settings.timePerQuestion)
+    );
 
-  // Determine correctness and calculate score
-  const correct = selectedIndex === question.correctIndex;
-  const pointsEarned = calculateScore(
-    correct,
-    clampedTime,
-    session.settings.timePerQuestion
-  );
+    // Determine correctness and calculate score
+    const correct = selectedIndex === question.correctIndex;
+    const pointsEarned = calculateScore(
+      correct,
+      clampedTime,
+      session.settings.timePerQuestion
+    );
 
-  // Record the answer
-  const playerAnswer: PlayerAnswer = {
-    selectedIndex,
-    correct,
-    pointsEarned,
-    timeRemaining: clampedTime,
-  };
+    // Record the answer
+    const playerAnswer: PlayerAnswer = {
+      selectedIndex,
+      correct,
+      pointsEarned,
+      timeRemaining: clampedTime,
+    };
 
-  if (!session.answeredQuestions[questionId]) {
-    session.answeredQuestions[questionId] = {};
-  }
-  session.answeredQuestions[questionId][playerId] = playerAnswer;
+    if (!session.answeredQuestions[questionId]) {
+      session.answeredQuestions[questionId] = {};
+    }
+    session.answeredQuestions[questionId][playerId] = playerAnswer;
 
-  // Update player's total score
-  player.score += pointsEarned;
+    // Update player's total score
+    player.score += pointsEarned;
 
-  return {
-    correct,
-    correctAnswer: question.correctName,
-    pointsEarned,
-    totalScore: player.score,
-  };
+    return {
+      correct,
+      correctAnswer: question.correctName,
+      pointsEarned,
+      totalScore: player.score,
+    };
+  });
 }
 
 // ---------------------------------------------------------------
@@ -298,6 +343,7 @@ export function allPlayersAnswered(
   sessionId: string,
   questionId: string
 ): boolean {
+  const sessions = loadSessions();
   const session = sessions.get(sessionId);
   if (!session) return false;
 
@@ -312,19 +358,21 @@ export function allPlayersAnswered(
  * or null if the quiz is finished.
  */
 export function advanceQuestion(sessionId: string): ClientQuestion | null {
-  const session = sessions.get(sessionId);
-  if (!session) {
-    throw new Error('Session not found');
-  }
+  return withSessions((sessions) => {
+    const session = sessions.get(sessionId);
+    if (!session) {
+      throw new Error('Session not found');
+    }
 
-  session.currentQuestionIndex++;
+    session.currentQuestionIndex++;
 
-  if (session.currentQuestionIndex >= session.questions.length) {
-    session.status = 'finished';
-    return null;
-  }
+    if (session.currentQuestionIndex >= session.questions.length) {
+      session.status = 'finished';
+      return null;
+    }
 
-  return toClientQuestion(session.questions[session.currentQuestionIndex]);
+    return toClientQuestion(session.questions[session.currentQuestionIndex]);
+  });
 }
 
 // ---------------------------------------------------------------
@@ -336,6 +384,7 @@ export function advanceQuestion(sessionId: string): ClientQuestion | null {
  * Players are sorted by score descending.
  */
 export function getResults(sessionId: string): SessionResults {
+  const sessions = loadSessions();
   const session = sessions.get(sessionId);
   if (!session) {
     throw new Error('Session not found');
@@ -370,22 +419,24 @@ export function getResults(sessionId: string): SessionResults {
  * transfer host status to the next connected player.
  */
 export function removePlayer(sessionId: string, playerId: string): void {
-  const session = sessions.get(sessionId);
-  if (!session) return;
+  withSessions((sessions) => {
+    const session = sessions.get(sessionId);
+    if (!session) return;
 
-  const player = session.players.find((p) => p.playerId === playerId);
-  if (!player) return;
+    const player = session.players.find((p) => p.playerId === playerId);
+    if (!player) return;
 
-  player.connected = false;
+    player.connected = false;
 
-  // Transfer host if needed
-  if (player.isHost) {
-    player.isHost = false;
-    const nextHost = session.players.find(
-      (p) => p.connected && p.playerId !== playerId
-    );
-    if (nextHost) {
-      nextHost.isHost = true;
+    // Transfer host if needed
+    if (player.isHost) {
+      player.isHost = false;
+      const nextHost = session.players.find(
+        (p) => p.connected && p.playerId !== playerId
+      );
+      if (nextHost) {
+        nextHost.isHost = true;
+      }
     }
-  }
+  });
 }
