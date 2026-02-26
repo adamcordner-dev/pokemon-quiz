@@ -4,15 +4,11 @@ A Pokémon quiz app inspired by the classic "Who's That Pokémon?" segment from 
 
 **Live:** [pokemon-quiz-taupe.vercel.app](https://pokemon-quiz-taupe.vercel.app)
 
-<!-- Screenshots -->
+### Home Screen
+![Home screen](docs/screenshots/home.PNG)
 
-| Home | Quiz | Results |
-|------|------|---------|
-| ![Home screen](docs/screenshots/home.png) | ![Quiz gameplay](docs/screenshots/quiz.png) | ![Results screen](docs/screenshots/results.png) |
-
-| Hard Mode (Silhouette) | Multiplayer Lobby | Multiplayer Results |
-|------------------------|-------------------|---------------------|
-| ![Hard mode](docs/screenshots/hard-mode.png) | ![Lobby](docs/screenshots/lobby.png) | ![Multiplayer results](docs/screenshots/multiplayer-results.png) |
+### Quiz Gameplay
+![Quiz gameplay](docs/screenshots/quiz.PNG)
 
 ---
 
