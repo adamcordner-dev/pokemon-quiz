@@ -33,6 +33,7 @@ export function useQuiz({ sessionId, playerId, questions, settings }: UseQuizPar
   const [isFinished, setIsFinished] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [answerHistory, setAnswerHistory] = useState<AnswerHistoryEntry[]>([]);
+  const [error, setError] = useState<string | null>(null);
 
   const { playCorrect, playWrong } = useSound();
 
@@ -72,6 +73,7 @@ export function useQuiz({ sessionId, playerId, questions, settings }: UseQuizPar
         if (result.correct) playCorrect(); else playWrong();
       } catch (err) {
         console.error('Failed to submit answer:', err);
+        setError(err instanceof Error ? err.message : 'Failed to submit answer. Check your connection.');
         // On error, still reveal so user isn't stuck
         setRevealed(true);
       } finally {
@@ -109,5 +111,6 @@ export function useQuiz({ sessionId, playerId, questions, settings }: UseQuizPar
     nextQuestion,
     settings,
     totalQuestions: questions.length,
+    error,
   };
 }

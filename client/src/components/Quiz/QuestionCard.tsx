@@ -2,6 +2,7 @@
 // Question Card
 // ============================================
 
+import { useState } from 'react';
 import type { ClientQuestion, AnswerResult } from '../../types';
 import OptionButton, { type OptionState } from './OptionButton';
 
@@ -24,6 +25,7 @@ export default function QuestionCard({
   hardMode,
   revealed,
 }: QuestionCardProps) {
+  const [imageLoaded, setImageLoaded] = useState(false);
 
   function getOptionState(index: number): OptionState {
     // Not yet answered — default look
@@ -54,11 +56,14 @@ export default function QuestionCard({
     <div className="question-card">
       <h3 className="question-title">Who's That Pokémon?</h3>
       <div className="pokemon-image-container">
+        {!imageLoaded && <div className="image-skeleton" />}
         <img
           src={question.imageUrl}
           alt="Pokemon"
-          className={`pokemon-image ${showSilhouette ? 'silhouette' : ''}`}
+          className={`pokemon-image ${showSilhouette ? 'silhouette' : ''} ${imageLoaded ? '' : 'image-hidden'}`}
           draggable={false}
+          onLoad={() => setImageLoaded(true)}
+          key={question.questionId}
         />
       </div>
       <div className="options-grid">

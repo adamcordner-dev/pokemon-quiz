@@ -383,8 +383,26 @@ body {
   transition: filter 0.5s;
 }
 
+.pokemon-image.image-hidden {
+  display: none;
+}
+
 .pokemon-image.silhouette {
   filter: brightness(0);
+}
+
+.image-skeleton {
+  width: 200px;
+  height: 200px;
+  border-radius: 16px;
+  background: linear-gradient(110deg, var(--btn-default) 30%, var(--btn-hover) 50%, var(--btn-default) 70%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
 }
 
 /* ---- Options Grid ---- */
@@ -441,6 +459,11 @@ body {
   background-color: transparent;
   border-color: var(--correct);
   color: var(--correct);
+}
+
+.option-icon {
+  margin-left: 0.35rem;
+  font-weight: 800;
 }
 
 /* ---- Post-Answer Feedback ---- */

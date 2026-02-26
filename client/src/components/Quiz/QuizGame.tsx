@@ -41,6 +41,32 @@ function isMultiplayerState(s: unknown): s is MultiplayerState {
 }
 
 // =============================================
+// Session storage helpers for refresh recovery
+// =============================================
+
+const SESSION_STORAGE_KEY = 'pokemon-quiz-active-game';
+
+function saveGameState(sessionId: string, state: SinglePlayerState | MultiplayerState): void {
+  try {
+    sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({ sessionId, state }));
+  } catch { /* quota exceeded or unavailable */ }
+}
+
+function loadGameState(sessionId: string): SinglePlayerState | MultiplayerState | null {
+  try {
+    const raw = sessionStorage.getItem(SESSION_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed.sessionId === sessionId) return parsed.state;
+  } catch { /* corrupted */ }
+  return null;
+}
+
+function clearGameState(): void {
+  try { sessionStorage.removeItem(SESSION_STORAGE_KEY); } catch { /* ignore */ }
+}
+
+// =============================================
 // Top-level: detect mode, render appropriate inner
 // =============================================
 
@@ -48,16 +74,24 @@ export default function QuizGame() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const location = useLocation();
   const navigate = useNavigate();
-  const state = location.state;
+
+  // Use router state if available, otherwise try sessionStorage
+  const state = location.state ?? (sessionId ? loadGameState(sessionId) : null);
 
   if (!state || !sessionId) {
     return (
       <div className="page-center">
-        <h2>Session not found</h2>
-        <button className="btn btn-primary" onClick={() => navigate('/')}>Go Home</button>
+        <div className="card" style={{ textAlign: 'center' }}>
+          <h2>Session Expired</h2>
+          <p className="hint-text">This quiz session is no longer available.</p>
+          <button className="btn btn-primary" onClick={() => navigate('/')}>Go Home</button>
+        </div>
       </div>
     );
   }
+
+  // Persist to sessionStorage for refresh recovery
+  saveGameState(sessionId, state as SinglePlayerState | MultiplayerState);
 
   if (isMultiplayerState(state)) {
     return (
@@ -99,6 +133,14 @@ function SinglePlayerGameInner({ sessionId, playerId, questions, settings }: Sin
   const navigate = useNavigate();
   const quiz = useQuiz({ sessionId, playerId, questions, settings });
 
+  // Warn before leaving mid-quiz
+  useEffect(() => {
+    if (quiz.isFinished) return;
+    const handler = (e: BeforeUnloadEvent) => { e.preventDefault(); };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [quiz.isFinished]);
+
   const handleTimerExpire = useCallback(() => {
     quiz.answerQuestion(-1, 0);
   }, [quiz.answerQuestion]);
@@ -110,6 +152,7 @@ function SinglePlayerGameInner({ sessionId, playerId, questions, settings }: Sin
   });
 
   if (quiz.isFinished) {
+    clearGameState();
     navigate(`/results/${sessionId}`, { replace: true, state: { playerId } });
     return null;
   }
@@ -151,6 +194,12 @@ function SinglePlayerGameInner({ sessionId, playerId, questions, settings }: Sin
         hardMode={settings.hardMode}
         revealed={quiz.revealed}
       />
+
+      {quiz.error && (
+        <div className="post-answer">
+          <p className="error-text">{quiz.error}</p>
+        </div>
+      )}
 
       {quiz.revealed && (
         <div className="post-answer">
@@ -220,8 +269,17 @@ function MultiplayerGameInner({
     timer.reset();
   }, [mp.questionIndex]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Warn before leaving mid-quiz
+  useEffect(() => {
+    if (mp.isFinished) return;
+    const handler = (e: BeforeUnloadEvent) => { e.preventDefault(); };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [mp.isFinished]);
+
   // Navigate to results when finished
   if (mp.isFinished) {
+    clearGameState();
     navigate(`/results/${sessionId}`, { replace: true, state: { playerId } });
     return null;
   }
@@ -237,6 +295,15 @@ function MultiplayerGameInner({
   // Determine post-answer UI
   function renderPostAnswer() {
     if (!mp.revealed && !mp.answered) return null;
+
+    // Show error if any
+    if (mp.error) {
+      return (
+        <div className="post-answer">
+          <p className="error-text">{mp.error}</p>
+        </div>
+      );
+    }
 
     // Show "selected" state while waiting for server
     if (mp.answered && !mp.revealed) {

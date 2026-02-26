@@ -62,6 +62,7 @@ export function useMultiplayer({
   const [results, setResults] = useState<SessionResults | null>(null);
   const [answerHistory, setAnswerHistory] = useState<AnswerHistoryEntry[]>([]);
   const [answeredPlayers, setAnsweredPlayers] = useState<Set<string>>(new Set());
+  const [error, setError] = useState<string | null>(null);
 
   const { playCorrect, playWrong } = useSound();
 
@@ -144,6 +145,7 @@ export function useMultiplayer({
         if (result.correct) playCorrect(); else playWrong();
       } catch (err) {
         console.error('Failed to submit multiplayer answer:', err);
+        setError(err instanceof Error ? err.message : 'Failed to submit answer. Check your connection.');
         setRevealed(true);
       } finally {
         setIsLoading(false);
@@ -191,5 +193,6 @@ export function useMultiplayer({
     answerQuestion,
     requestNextQuestion,
     settings,
+    error,
   };
 }
