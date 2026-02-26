@@ -35,6 +35,7 @@ export async function getTotalPokemonCount(): Promise<number> {
 /**
  * Fetch a single Pokemon by ID from PokeAPI.
  * Returns null if the Pokemon has no official artwork.
+ * Uses the species name (not form name) for the display name.
  */
 export async function fetchPokemon(id: number): Promise<PokemonData | null> {
   const response = await fetch(`https://pokeapi.co/api/v2/pokemon/${id}`);
@@ -53,11 +54,20 @@ export async function fetchPokemon(id: number): Promise<PokemonData | null> {
     return null;
   }
 
-  const name = cleanPokemonName(data.name as string);
+  // Extract species name from the species URL (e.g. "minior" not "minior-red-meteor")
+  const speciesName: string = data.species?.name ?? data.name;
+  const name = cleanPokemonName(speciesName);
+
+  // Extract types (e.g. ["fire", "flying"])
+  const types: string[] = (data.types ?? [])
+    .sort((a: { slot: number }, b: { slot: number }) => a.slot - b.slot)
+    .map((t: { type: { name: string } }) => t.type.name);
 
   return {
     id: data.id as number,
     name,
+    speciesName,
+    types,
     imageUrl,
   };
 }
@@ -108,9 +118,15 @@ async function fetchPokemonBatch(ids: number[]): Promise<PokemonData[]> {
 }
 
 /**
- * Generate quiz questions.
- * Each question has 1 correct Pokemon (shown as image) and 3 wrong options.
- * All 4 options are shuffled.
+ * Generate quiz questions with type-aware distractors.
+ *
+ * For each question:
+ * - 1 correct Pokémon (shown as image)
+ * - 2 wrong options that share at least one type with the correct answer
+ * - 1 fully random wrong option
+ * - No two options from the same species
+ *
+ * Falls back to random distractors if not enough type-matched Pokémon exist.
  */
 export async function generateQuestions(
   settings: GameSettings
@@ -118,13 +134,12 @@ export async function generateQuestions(
   const totalPokemon = await getTotalPokemonCount();
   const questionsNeeded = settings.questionCount;
 
-  // We need 4 unique Pokemon per question (1 correct + 3 wrong)
-  const pokemonNeeded = questionsNeeded * 4;
-
-  // Fetch more than needed to account for Pokemon without artwork
-  const extraBuffer = Math.ceil(pokemonNeeded * 0.3);
+  // Fetch a larger pool so we have enough for type-matching + dedup
+  // We need 4 per question but want a generous pool for type matching
+  const poolTarget = Math.max(questionsNeeded * 8, 80);
+  const extraBuffer = Math.ceil(poolTarget * 0.3);
   const idsToFetch = getRandomUniqueIds(
-    Math.min(pokemonNeeded + extraBuffer, totalPokemon),
+    Math.min(poolTarget + extraBuffer, totalPokemon),
     totalPokemon
   );
 
@@ -132,12 +147,13 @@ export async function generateQuestions(
 
   // If we still don't have enough, fetch more in rounds
   let attempts = 0;
-  while (validPokemon.length < pokemonNeeded && attempts < 5) {
+  const minNeeded = questionsNeeded * 4;
+  while (validPokemon.length < minNeeded && attempts < 5) {
     attempts++;
     const existingIds = new Set(validPokemon.map((p) => p.id));
     const moreIds: number[] = [];
 
-    while (moreIds.length < pokemonNeeded - validPokemon.length + 10) {
+    while (moreIds.length < minNeeded - validPokemon.length + 20) {
       const id = Math.floor(Math.random() * totalPokemon) + 1;
       if (!existingIds.has(id) && !moreIds.includes(id)) {
         moreIds.push(id);
@@ -148,48 +164,107 @@ export async function generateQuestions(
     validPokemon = validPokemon.concat(morePokemon);
   }
 
-  if (validPokemon.length < pokemonNeeded) {
-    throw new Error(
-      `Could not fetch enough Pokemon with artwork. Needed ${pokemonNeeded}, got ${validPokemon.length}.`
-    );
-  }
-
-  // Ensure no duplicate names (some forms might clean to the same name)
-  const seenNames = new Set<string>();
+  // Deduplicate by species name (keep first occurrence of each species)
+  const seenSpecies = new Set<string>();
   const uniquePokemon: PokemonData[] = [];
   for (const p of validPokemon) {
-    if (!seenNames.has(p.name)) {
-      seenNames.add(p.name);
+    if (!seenSpecies.has(p.speciesName)) {
+      seenSpecies.add(p.speciesName);
       uniquePokemon.push(p);
     }
   }
 
-  if (uniquePokemon.length < pokemonNeeded) {
+  if (uniquePokemon.length < minNeeded) {
     throw new Error(
-      `Not enough uniquely-named Pokemon. Needed ${pokemonNeeded}, got ${uniquePokemon.length}.`
+      `Not enough uniquely-named Pokemon. Needed ${minNeeded}, got ${uniquePokemon.length}.`
     );
   }
 
-  // Shuffle and slice into groups of 4
-  const shuffled = shuffleArray(uniquePokemon).slice(0, pokemonNeeded);
+  // Shuffle the pool and pick correct Pokémon for each question
+  const shuffled = shuffleArray(uniquePokemon);
+  const correctPokemon = shuffled.slice(0, questionsNeeded);
+  const distractorPool = shuffled.slice(questionsNeeded);
+
+  // Build a type index for fast lookup of type-matched distractors
+  const typeIndex = new Map<string, PokemonData[]>();
+  for (const p of distractorPool) {
+    for (const t of p.types) {
+      let list = typeIndex.get(t);
+      if (!list) {
+        list = [];
+        typeIndex.set(t, list);
+      }
+      list.push(p);
+    }
+  }
+
+  const usedSpecies = new Set<string>(correctPokemon.map((p) => p.speciesName));
   const questions: Question[] = [];
 
-  for (let i = 0; i < questionsNeeded; i++) {
-    const group = shuffled.slice(i * 4, i * 4 + 4);
-    // First in group is the "correct" one (shown as image)
-    const correctPokemon = group[0];
+  for (const correct of correctPokemon) {
+    const distractors: PokemonData[] = [];
 
-    // Build options array and shuffle it
-    const options = shuffleArray(group.map((p) => p.name));
-    const correctIndex = options.indexOf(correctPokemon.name);
+    // --- Find 2 type-matched distractors ---
+    // Collect candidates that share at least one type and aren't the same species
+    const typeMatched: PokemonData[] = [];
+    for (const t of correct.types) {
+      const candidates = typeIndex.get(t) ?? [];
+      for (const c of candidates) {
+        if (
+          c.speciesName !== correct.speciesName &&
+          !usedSpecies.has(c.speciesName) &&
+          !typeMatched.some((tm) => tm.speciesName === c.speciesName)
+        ) {
+          typeMatched.push(c);
+        }
+      }
+    }
+
+    // Shuffle and pick up to 2
+    const shuffledTypeMatched = shuffleArray(typeMatched);
+    for (const tm of shuffledTypeMatched) {
+      if (distractors.length >= 2) break;
+      usedSpecies.add(tm.speciesName);
+      distractors.push(tm);
+    }
+
+    // --- Fill remaining slots (1 random + any unfilled type slots) ---
+    for (const p of distractorPool) {
+      if (distractors.length >= 3) break;
+      if (
+        p.speciesName !== correct.speciesName &&
+        !usedSpecies.has(p.speciesName)
+      ) {
+        usedSpecies.add(p.speciesName);
+        distractors.push(p);
+      }
+    }
+
+    // Emergency fallback: if still not enough, relax constraints
+    if (distractors.length < 3) {
+      for (const p of uniquePokemon) {
+        if (distractors.length >= 3) break;
+        if (
+          p.speciesName !== correct.speciesName &&
+          !distractors.some((d) => d.speciesName === p.speciesName)
+        ) {
+          distractors.push(p);
+        }
+      }
+    }
+
+    // Build options and shuffle
+    const allOptions = [correct, ...distractors];
+    const shuffledOptions = shuffleArray(allOptions.map((p) => p.name));
+    const correctIndex = shuffledOptions.indexOf(correct.name);
 
     questions.push({
       questionId: crypto.randomUUID(),
-      imageUrl: correctPokemon.imageUrl,
-      options,
+      imageUrl: correct.imageUrl,
+      options: shuffledOptions,
       correctIndex,
-      correctName: correctPokemon.name,
-      pokemonId: correctPokemon.id,
+      correctName: correct.name,
+      pokemonId: correct.id,
     });
   }
 

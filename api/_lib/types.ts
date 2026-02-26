@@ -6,7 +6,9 @@
 
 export interface PokemonData {
   id: number;
-  name: string;
+  name: string;       // Display name (cleaned species name)
+  speciesName: string; // Raw species name from PokeAPI (e.g. "minior")
+  types: string[];     // e.g. ["fire", "flying"]
   imageUrl: string;
 }
 
