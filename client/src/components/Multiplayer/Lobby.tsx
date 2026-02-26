@@ -33,7 +33,6 @@ export default function Lobby() {
   const [isHost, setIsHost] = useState(state?.isHost ?? false);
   const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState('');
-  const [copied, setCopied] = useState(false);
 
   const playerId = state?.playerId ?? '';
   const roomCode = state?.roomCode ?? '';
@@ -149,8 +148,6 @@ export default function Lobby() {
   async function handleCopy() {
     try {
       await navigator.clipboard.writeText(roomCode);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
     } catch {
       // Fallback: select the text
     }
@@ -184,9 +181,6 @@ export default function Lobby() {
           <span className="room-code-label">Room Code</span>
           <div className="room-code-value" onClick={handleCopy}>
             <span>{roomCode}</span>
-            <button className="copy-btn" title="Copy room code">
-              {copied ? '✓' : '📋'}
-            </button>
           </div>
         </div>
 

@@ -346,8 +346,6 @@ function MultiplayerGameInner({
                 : 'Incorrect!'}
           </div>
 
-          <Standings players={mp.players} currentPlayerId={playerId} />
-
           {mp.isHost ? (
             <button
               className="btn btn-primary"
@@ -365,6 +363,8 @@ function MultiplayerGameInner({
               {isLastQuestion ? 'Waiting for host to show results…' : 'Waiting for host…'}
             </p>
           )}
+
+          <Standings players={mp.players} currentPlayerId={playerId} />
         </div>
       );
     }

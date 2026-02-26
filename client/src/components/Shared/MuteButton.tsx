@@ -10,12 +10,12 @@ export default function MuteButton() {
 
   return (
     <button
-      className="mute-button"
+      className={`mute-button ${muted ? 'muted' : ''}`}
       onClick={toggleMute}
       aria-label={muted ? 'Unmute sounds' : 'Mute sounds'}
       title={muted ? 'Unmute sounds' : 'Mute sounds'}
     >
-      {muted ? '🔇' : '🔊'}
+      🔊
     </button>
   );
 }
