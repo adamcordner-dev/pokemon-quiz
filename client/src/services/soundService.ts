@@ -50,3 +50,8 @@ export function playWrong(): void {
 export function playVictory(): void {
   play(victorySound);
 }
+
+export function stopVictory(): void {
+  victorySound.pause();
+  victorySound.currentTime = 0;
+}

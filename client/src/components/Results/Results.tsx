@@ -4,12 +4,19 @@
 // Handles both single-player and multiplayer results.
 // Multiplayer shows a podium + all players' standings.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
+import confetti from 'canvas-confetti';
 import * as apiClient from '../../services/apiClient';
 import type { SessionResults, PlayerInfo } from '../../types';
 import LoadingSpinner from '../Shared/LoadingSpinner';
 import { useSound } from '../../context/SoundContext';
+
+function fireConfetti() {
+  const defaults = { colors: ['#ee1515', '#f1c40f', '#3b4cca', '#ffffff'], ticks: 120 };
+  confetti({ ...defaults, angle: 60, spread: 55, origin: { x: 0, y: 1 }, particleCount: 80 });
+  confetti({ ...defaults, angle: 120, spread: 55, origin: { x: 1, y: 1 }, particleCount: 80 });
+}
 
 // ---------------------------------------------------------------
 // Podium (top 3 players)
@@ -75,26 +82,34 @@ export default function Results() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const navigate = useNavigate();
   const location = useLocation();
-  const { playVictory } = useSound();
+  const { playVictory, stopVictory } = useSound();
 
   const statePlayerId = (location.state as { playerId?: string } | null)?.playerId;
 
   const [results, setResults] = useState<SessionResults | null>(null);
   const [error, setError] = useState('');
+  const didLoad = useRef(false);
 
   useEffect(() => {
-    if (!sessionId) return;
+    if (!sessionId || didLoad.current) return;
+    didLoad.current = true;
 
     apiClient
       .getResults(sessionId)
       .then((data) => {
         setResults(data);
         playVictory();
+        fireConfetti();
       })
       .catch((err) => {
         setError(err instanceof Error ? err.message : 'Failed to load results');
       });
   }, [sessionId, playVictory]);
+
+  // Separate cleanup effect — always registers stopVictory on unmount
+  useEffect(() => {
+    return () => { stopVictory(); };
+  }, [stopVictory]);
 
   if (error) {
     return (
@@ -129,15 +144,30 @@ export default function Results() {
     return answer?.correct;
   }).length;
 
+  // Average answer time (timePerQuestion − timeRemaining)
+  const myAnswers = results.questions
+    .map((q) => q.playerAnswers[myPlayer.playerId])
+    .filter((a): a is NonNullable<typeof a> => a != null && a.selectedIndex !== -1);
+  const avgAnswerTime =
+    myAnswers.length > 0
+      ? (myAnswers.reduce((sum, a) => sum + (results.settings.timePerQuestion - a.timeRemaining), 0) / myAnswers.length).toFixed(1)
+      : '—';
+
   // My rank in multiplayer
   const myRank = results.players.findIndex((p) => p.playerId === myPlayer.playerId) + 1;
 
   function handlePlayAgain() {
+    stopVictory();
     if (isMultiplayer) {
       navigate('/multiplayer');
     } else {
       navigate('/single-player');
     }
+  }
+
+  function handleHome() {
+    stopVictory();
+    navigate('/');
   }
 
   return (
@@ -165,6 +195,7 @@ export default function Results() {
             <p>
               {myCorrectCount} / {results.questions.length} correct ({myPercentage}%)
             </p>
+            <p>Avg answer time: {avgAnswerTime}s</p>
           </div>
         </div>
 
@@ -205,10 +236,16 @@ export default function Results() {
           <button className="btn btn-primary" onClick={handlePlayAgain}>
             Play Again
           </button>
-          <button className="btn btn-secondary" onClick={() => navigate('/')}>
+          <button className="btn btn-secondary" onClick={handleHome}>
             Home
           </button>
         </div>
+        <a
+          className="feedback-link"
+          href="mailto:placeholder@example.com?subject=Pokemon%20Quiz%20Feedback"
+        >
+          Send Feedback
+        </a>
       </div>
     </div>
   );

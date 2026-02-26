@@ -12,6 +12,7 @@ interface SoundContextValue {
   playCorrect: () => void;
   playWrong: () => void;
   playVictory: () => void;
+  stopVictory: () => void;
 }
 
 const SoundContext = createContext<SoundContextValue | null>(null);
@@ -30,10 +31,11 @@ export function SoundProvider({ children }: { children: ReactNode }) {
   const playCorrect = useCallback(() => soundService.playCorrect(), []);
   const playWrong = useCallback(() => soundService.playWrong(), []);
   const playVictory = useCallback(() => soundService.playVictory(), []);
+  const stopVictory = useCallback(() => soundService.stopVictory(), []);
 
   return (
     <SoundContext.Provider
-      value={{ muted, toggleMute, playCorrect, playWrong, playVictory }}
+      value={{ muted, toggleMute, playCorrect, playWrong, playVictory, stopVictory }}
     >
       {children}
     </SoundContext.Provider>
