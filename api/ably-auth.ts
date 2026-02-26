@@ -15,7 +15,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
     const apiKey = process.env.ABLY_API_KEY;
     if (!apiKey) {
-      return res.status(503).json({
+      return res.status(501).json({
         error: 'Real-time features are not configured (ABLY_API_KEY missing)',
       });
     }

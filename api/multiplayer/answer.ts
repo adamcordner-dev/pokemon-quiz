@@ -2,14 +2,11 @@
 // POST /api/multiplayer/answer
 // ============================================
 // Submit an answer in a multiplayer game.
-// Also checks if all players have answered and broadcasts standings.
+// Uses the atomic submitMultiplayerAnswer to avoid race conditions
+// when multiple players answer simultaneously.
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import {
-  submitAnswer,
-  allPlayersAnswered,
-  getSession,
-} from '../_lib/sessionService';
+import { submitMultiplayerAnswer } from '../_lib/sessionService';
 import { publishToSession } from '../_lib/ablyService';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -31,14 +28,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (!questionId || typeof questionId !== 'string') {
       return res.status(400).json({ error: 'questionId is required' });
     }
-    if (typeof selectedIndex !== 'number' || selectedIndex < 0 || selectedIndex > 3) {
-      return res.status(400).json({ error: 'selectedIndex must be 0-3' });
+    if (typeof selectedIndex !== 'number' || selectedIndex < -1 || selectedIndex > 3) {
+      return res.status(400).json({ error: 'selectedIndex must be -1 to 3' });
     }
     if (typeof timeRemaining !== 'number' || timeRemaining < 0) {
       return res.status(400).json({ error: 'timeRemaining must be >= 0' });
     }
 
-    const result = submitAnswer(
+    // Single atomic operation: submit + check all answered + gather standings
+    const result = submitMultiplayerAnswer(
       sessionId,
       playerId,
       questionId,
@@ -46,28 +44,28 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       timeRemaining
     );
 
-    // Get the player's name for broadcast
-    const session = getSession(sessionId)!;
-    const player = session.players.find((p) => p.playerId === playerId);
-
     // Broadcast that this player answered (no score details)
     await publishToSession(sessionId, 'answer_result', {
       playerId,
-      playerName: player?.name ?? 'Unknown',
+      playerName: result.playerName,
       answered: true,
     });
 
-    // Check if all connected players have answered
-    if (allPlayersAnswered(sessionId, questionId)) {
-      const questionAnswers = session.answeredQuestions[questionId] ?? {};
-
+    // If all connected players have answered, broadcast standings
+    if (result.allAnswered) {
       await publishToSession(sessionId, 'all_answered', {
-        standings: [...session.players].sort((a, b) => b.score - a.score),
-        questionResults: questionAnswers,
+        standings: result.standings,
+        questionResults: result.questionResults,
       });
     }
 
-    return res.status(200).json(result);
+    // Return standard AnswerResult to the calling player
+    return res.status(200).json({
+      correct: result.correct,
+      correctAnswer: result.correctAnswer,
+      pointsEarned: result.pointsEarned,
+      totalScore: result.totalScore,
+    });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     const status = message.includes('not found') ? 404 : 400;

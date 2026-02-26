@@ -25,8 +25,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (!questionId || typeof questionId !== 'string') {
       return res.status(400).json({ error: 'questionId is required' });
     }
-    if (typeof selectedIndex !== 'number' || selectedIndex < 0 || selectedIndex > 3) {
-      return res.status(400).json({ error: 'selectedIndex must be 0-3' });
+    if (typeof selectedIndex !== 'number' || selectedIndex < -1 || selectedIndex > 3) {
+      return res.status(400).json({ error: 'selectedIndex must be -1 to 3' });
     }
     if (typeof timeRemaining !== 'number' || timeRemaining < 0) {
       return res.status(400).json({ error: 'timeRemaining must be >= 0' });

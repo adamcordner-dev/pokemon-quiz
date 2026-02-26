@@ -43,16 +43,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(200).json({ finished: true, results });
     }
 
+    // Re-read session to get the updated currentQuestionIndex
+    const updatedSession = getSession(sessionId)!;
+
     // Broadcast next question
     await publishToSession(sessionId, 'next_question', {
       question: nextQuestion,
-      questionIndex: session.currentQuestionIndex,
+      questionIndex: updatedSession.currentQuestionIndex,
     });
 
     return res.status(200).json({
       finished: false,
       question: nextQuestion,
-      questionIndex: session.currentQuestionIndex,
+      questionIndex: updatedSession.currentQuestionIndex,
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);

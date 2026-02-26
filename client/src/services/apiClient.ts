@@ -12,6 +12,7 @@ import type {
   MultiplayerJoinResponse,
   LobbyState,
   ClientQuestion,
+  PollResponse,
 } from '../types';
 
 // ---------------------------------------------------------------
@@ -153,4 +154,12 @@ export function nextQuestion(
   playerId: string
 ): Promise<NextQuestionResponse> {
   return post('/api/multiplayer/next', { sessionId, playerId });
+}
+
+// ---------------------------------------------------------------
+// Polling (fallback when Ably is unavailable)
+// ---------------------------------------------------------------
+
+export function pollSession(sessionId: string): Promise<PollResponse> {
+  return get(`/api/multiplayer/poll/${sessionId}`);
 }

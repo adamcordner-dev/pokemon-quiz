@@ -78,6 +78,15 @@ export interface AnswerResult {
   totalScore: number;
 }
 
+/** Extended answer result used by the multiplayer answer endpoint.
+ *  Contains everything needed in a single atomic file operation. */
+export interface MultiplayerAnswerResult extends AnswerResult {
+  playerName: string;
+  allAnswered: boolean;
+  standings: PlayerInfo[];
+  questionResults: Record<string, PlayerAnswer>;
+}
+
 export interface QuizStartResponse {
   sessionId: string;
   playerId: string;
@@ -104,6 +113,7 @@ export interface SessionResults {
   players: PlayerInfo[];
   questions: ResultQuestion[];
   settings: GameSettings;
+  isMultiplayer: boolean;
 }
 
 export interface ResultQuestion {
@@ -120,6 +130,6 @@ export function toClientQuestion(q: Question): ClientQuestion {
   return {
     questionId: q.questionId,
     imageUrl: q.imageUrl,
-    options: q.options,
+    options: [...q.options],
   };
 }

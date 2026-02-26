@@ -17,6 +17,7 @@ import {
   MultiplayerCreateResponse,
   MultiplayerJoinResponse,
   AnswerResult,
+  MultiplayerAnswerResult,
   SessionResults,
   ResultQuestion,
   ClientQuestion,
@@ -32,6 +33,45 @@ import { calculateScore } from './scoringService';
 // TODO: Replace with Upstash Redis for production (Phase 15).
 
 const STORE_PATH = path.join(os.tmpdir(), 'pokemon-quiz-sessions.json');
+const LOCK_DIR = STORE_PATH + '.lock';
+
+// ---- Cross-process file lock (mkdir is atomic on all platforms) ----
+
+function acquireLock(): void {
+  const maxAttempts = 200;
+  const retryMs = 25;
+
+  for (let i = 0; i < maxAttempts; i++) {
+    try {
+      fs.mkdirSync(LOCK_DIR);
+      return; // lock acquired
+    } catch (err: any) {
+      if (err.code !== 'EEXIST') throw err;
+      // Check for stale lock (> 10 s)
+      try {
+        const stat = fs.statSync(LOCK_DIR);
+        if (Date.now() - stat.mtimeMs > 10_000) {
+          try { fs.rmdirSync(LOCK_DIR); } catch { /* already removed */ }
+          continue;
+        }
+      } catch {
+        continue; // lock was just released, retry immediately
+      }
+      // Busy-wait before retry
+      const end = Date.now() + retryMs;
+      while (Date.now() < end) { /* spin */ }
+    }
+  }
+  // Force-break stale lock as last resort
+  try { fs.rmdirSync(LOCK_DIR); } catch { /* ignore */ }
+  fs.mkdirSync(LOCK_DIR);
+}
+
+function releaseLock(): void {
+  try { fs.rmdirSync(LOCK_DIR); } catch { /* ignore */ }
+}
+
+// ---- Session persistence ----
 
 function loadSessions(): Map<string, GameSession> {
   try {
@@ -51,12 +91,17 @@ function saveSessions(sessions: Map<string, GameSession>): void {
   fs.writeFileSync(STORE_PATH, JSON.stringify(entries), 'utf-8');
 }
 
-/** Helper: read → mutate → write pattern */
+/** Helper: read → mutate → write with cross-process file lock */
 function withSessions<T>(fn: (sessions: Map<string, GameSession>) => T): T {
-  const sessions = loadSessions();
-  const result = fn(sessions);
-  saveSessions(sessions);
-  return result;
+  acquireLock();
+  try {
+    const sessions = loadSessions();
+    const result = fn(sessions);
+    saveSessions(sessions);
+    return result;
+  } finally {
+    releaseLock();
+  }
 }
 
 /** Maximum players allowed in a multiplayer room. */
@@ -247,13 +292,58 @@ export function joinMultiplayerSession(
  * Retrieve a session by its ID.
  */
 export function getSession(sessionId: string): GameSession | undefined {
-  const sessions = loadSessions();
-  return sessions.get(sessionId);
+  acquireLock();
+  try {
+    const sessions = loadSessions();
+    return sessions.get(sessionId);
+  } finally {
+    releaseLock();
+  }
 }
 
 // ---------------------------------------------------------------
 // Answering
 // ---------------------------------------------------------------
+
+/**
+ * Start a multiplayer game. Sets status to 'active' and persists the change.
+ * Only the host can call this, and there must be at least 2 connected players.
+ */
+export function startGame(
+  sessionId: string,
+  playerId: string
+): { question: ClientQuestion; questionIndex: number; totalQuestions: number } {
+  return withSessions((sessions) => {
+    const session = sessions.get(sessionId);
+    if (!session) {
+      throw new Error('Session not found');
+    }
+
+    const player = session.players.find((p) => p.playerId === playerId);
+    if (!player || !player.isHost) {
+      throw new Error('Only the host can start the game');
+    }
+
+    const connectedPlayers = session.players.filter((p) => p.connected);
+    if (connectedPlayers.length < 2) {
+      throw new Error('Need at least 2 players to start');
+    }
+
+    if (session.status !== 'waiting') {
+      throw new Error('Game has already started');
+    }
+
+    session.status = 'active';
+    session.currentQuestionIndex = 0;
+
+    const firstQuestion = toClientQuestion(session.questions[0]);
+    return {
+      question: firstQuestion,
+      questionIndex: 0,
+      totalQuestions: session.questions.length,
+    };
+  });
+}
 
 /**
  * Submit a player's answer for a question.
@@ -340,6 +430,88 @@ export function submitAnswer(
   });
 }
 
+/**
+ * Atomic multiplayer answer: submit, check all-answered, and gather
+ * standings — all within a single locked file read/write.
+ * Eliminates the race condition where concurrent answers could clobber
+ * each other via separate read-modify-write cycles.
+ */
+export function submitMultiplayerAnswer(
+  sessionId: string,
+  playerId: string,
+  questionId: string,
+  selectedIndex: number,
+  timeRemainingSeconds: number
+): MultiplayerAnswerResult {
+  return withSessions((sessions) => {
+    const session = sessions.get(sessionId);
+    if (!session) throw new Error('Session not found');
+    if (session.status !== 'active') throw new Error('Session is not active');
+
+    const question = session.questions.find((q) => q.questionId === questionId);
+    if (!question) throw new Error('Question not found');
+
+    // Anti-cheat: only allow answering the current question
+    const currentQ = session.questions[session.currentQuestionIndex];
+    if (currentQ.questionId !== questionId) {
+      throw new Error('Cannot answer a question that is not the current one');
+    }
+
+    const player = session.players.find((p) => p.playerId === playerId);
+    if (!player) throw new Error('Player not found');
+
+    // Duplicate check
+    const existingAnswers = session.answeredQuestions[questionId];
+    if (existingAnswers && existingAnswers[playerId]) {
+      throw new Error('Already answered this question');
+    }
+
+    // Clamp time (anti-cheat)
+    const clampedTime = Math.max(
+      0,
+      Math.min(timeRemainingSeconds, session.settings.timePerQuestion)
+    );
+
+    const correct = selectedIndex === question.correctIndex;
+    const pointsEarned = calculateScore(
+      correct,
+      clampedTime,
+      session.settings.timePerQuestion
+    );
+
+    // Record answer
+    const playerAnswer: PlayerAnswer = {
+      selectedIndex,
+      correct,
+      pointsEarned,
+      timeRemaining: clampedTime,
+    };
+    if (!session.answeredQuestions[questionId]) {
+      session.answeredQuestions[questionId] = {};
+    }
+    session.answeredQuestions[questionId][playerId] = playerAnswer;
+    player.score += pointsEarned;
+
+    // Check if all connected players have answered (within same lock)
+    const questionAnswers = session.answeredQuestions[questionId];
+    const connectedPlayers = session.players.filter((p) => p.connected);
+    const allDone = connectedPlayers.every(
+      (p) => questionAnswers[p.playerId] !== undefined
+    );
+
+    return {
+      correct,
+      correctAnswer: question.correctName,
+      pointsEarned,
+      totalScore: player.score,
+      playerName: player.name,
+      allAnswered: allDone,
+      standings: [...session.players].sort((a, b) => b.score - a.score),
+      questionResults: questionAnswers,
+    };
+  });
+}
+
 // ---------------------------------------------------------------
 // Multiplayer progression
 // ---------------------------------------------------------------
@@ -351,14 +523,19 @@ export function allPlayersAnswered(
   sessionId: string,
   questionId: string
 ): boolean {
-  const sessions = loadSessions();
-  const session = sessions.get(sessionId);
-  if (!session) return false;
+  acquireLock();
+  try {
+    const sessions = loadSessions();
+    const session = sessions.get(sessionId);
+    if (!session) return false;
 
-  const questionAnswers = session.answeredQuestions[questionId] ?? {};
-  const connectedPlayers = session.players.filter((p) => p.connected);
+    const questionAnswers = session.answeredQuestions[questionId] ?? {};
+    const connectedPlayers = session.players.filter((p) => p.connected);
 
-  return connectedPlayers.every((p) => questionAnswers[p.playerId] !== undefined);
+    return connectedPlayers.every((p) => questionAnswers[p.playerId] !== undefined);
+  } finally {
+    releaseLock();
+  }
 }
 
 /**
@@ -415,6 +592,7 @@ export function getResults(sessionId: string): SessionResults {
     players: sortedPlayers,
     questions,
     settings: session.settings,
+    isMultiplayer: session.isMultiplayer,
   };
 }
 

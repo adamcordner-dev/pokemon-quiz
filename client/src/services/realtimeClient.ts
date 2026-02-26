@@ -1,7 +1,9 @@
 // ============================================
-// Realtime Client Service (Ably)
+// Realtime Client Service (Ably + Polling Fallback)
 // ============================================
-// Manages Ably Realtime subscription for multiplayer sessions.
+// Manages real-time multiplayer events.
+// Uses Ably when available; falls back to polling /api/multiplayer/poll
+// every 1 second when ABLY_API_KEY is not configured (local dev).
 
 import * as Ably from 'ably';
 import type {
@@ -9,7 +11,9 @@ import type {
   PlayerInfo,
   PlayerAnswer,
   SessionResults,
+  PollResponse,
 } from '../types';
+import { pollSession } from './apiClient';
 
 // ---------------------------------------------------------------
 // Event payload types
@@ -67,30 +71,39 @@ export interface SessionHandlers {
 }
 
 // ---------------------------------------------------------------
-// Client singleton
+// State
 // ---------------------------------------------------------------
 
 let realtimeClient: Ably.Realtime | null = null;
 let currentChannel: Ably.RealtimeChannel | null = null;
+let pollIntervalId: ReturnType<typeof setInterval> | null = null;
+let usePolling = false;
 
-function getClient(): Ably.Realtime {
-  if (!realtimeClient) {
-    realtimeClient = new Ably.Realtime({
-      authUrl: '/api/ably-auth',
-    });
+// ---------------------------------------------------------------
+// Ably Mode
+// ---------------------------------------------------------------
+
+async function initAbly(): Promise<boolean> {
+  try {
+    // Check if Ably auth is available
+    const res = await fetch('/api/ably-auth');
+    if (res.status === 501) {
+      // Server says Ably not configured — use polling
+      return false;
+    }
+    if (!res.ok) return false;
+
+    realtimeClient = new Ably.Realtime({ authUrl: '/api/ably-auth' });
+    return true;
+  } catch {
+    return false;
   }
-  return realtimeClient;
 }
 
-/**
- * Subscribe to all game events on a session's Ably channel.
- */
-export function subscribeToSession(
-  sessionId: string,
-  handlers: SessionHandlers
-): void {
-  const client = getClient();
-  const channel = client.channels.get(`game:${sessionId}`);
+function subscribeAbly(sessionId: string, handlers: SessionHandlers): void {
+  if (!realtimeClient) return;
+
+  const channel = realtimeClient.channels.get(`game:${sessionId}`);
   currentChannel = channel;
 
   const eventMap: Record<string, ((data: unknown) => void) | undefined> = {
@@ -113,8 +126,128 @@ export function subscribeToSession(
   }
 }
 
+// ---------------------------------------------------------------
+// Polling Mode
+// ---------------------------------------------------------------
+
+function startPolling(sessionId: string, handlers: SessionHandlers): void {
+  let prev: PollResponse | null = null;
+
+  async function doPoll() {
+    try {
+      const curr = await pollSession(sessionId);
+
+      if (prev) {
+        // Diff and fire handlers
+
+        // Player list changed (join/disconnect)
+        if (JSON.stringify(curr.players) !== JSON.stringify(prev.players)) {
+          handlers.onPlayerJoined?.({ players: curr.players });
+
+          // Check for host change
+          const prevHost = prev.players.find((p) => p.isHost);
+          const currHost = curr.players.find((p) => p.isHost);
+          if (prevHost && currHost && prevHost.playerId !== currHost.playerId) {
+            handlers.onHostChanged?.({
+              newHostId: currHost.playerId,
+              players: curr.players,
+            });
+          }
+
+          // Check for disconnected players
+          for (const p of prev.players) {
+            const match = curr.players.find((c) => c.playerId === p.playerId);
+            if (match && p.connected && !match.connected) {
+              handlers.onPlayerDisconnected?.({
+                playerId: p.playerId,
+                players: curr.players,
+              });
+            }
+          }
+        }
+
+        // Game started (status changed from waiting to active)
+        if (prev.status === 'waiting' && curr.status === 'active' && curr.currentQuestion) {
+          handlers.onGameStarted?.({
+            question: curr.currentQuestion,
+            questionIndex: curr.questionIndex ?? 0,
+            totalQuestions: curr.totalQuestions ?? 0,
+          });
+        }
+
+        // Question advanced
+        if (
+          prev.status === 'active' &&
+          curr.status === 'active' &&
+          prev.questionIndex !== undefined &&
+          curr.questionIndex !== undefined &&
+          curr.questionIndex > prev.questionIndex &&
+          curr.currentQuestion
+        ) {
+          handlers.onNextQuestion?.({
+            question: curr.currentQuestion,
+            questionIndex: curr.questionIndex,
+          });
+        }
+
+        // All answered (transition from false → true)
+        if (
+          curr.status === 'active' &&
+          curr.allAnswered &&
+          !prev.allAnswered &&
+          curr.standings
+        ) {
+          handlers.onAllAnswered?.({
+            standings: curr.players,
+            questionResults: {},
+          });
+        }
+
+        // Game over
+        if (prev.status !== 'finished' && curr.status === 'finished' && curr.results) {
+          handlers.onGameOver?.({ results: curr.results });
+        }
+      }
+
+      prev = curr;
+    } catch (err) {
+      console.error('[Poll] Error:', err);
+    }
+  }
+
+  // First poll immediately
+  doPoll();
+  pollIntervalId = setInterval(doPoll, 1000);
+}
+
+// ---------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------
+
 /**
- * Detach from the current channel and close the connection.
+ * Subscribe to all game events on a session.
+ * Tries Ably first; falls back to polling if unavailable.
+ */
+export async function subscribeToSession(
+  sessionId: string,
+  handlers: SessionHandlers
+): Promise<void> {
+  // Clean up any previous subscription
+  unsubscribe();
+
+  const ablyAvailable = await initAbly();
+
+  if (ablyAvailable) {
+    usePolling = false;
+    subscribeAbly(sessionId, handlers);
+  } else {
+    usePolling = true;
+    startPolling(sessionId, handlers);
+  }
+}
+
+/**
+ * Detach from the current channel / stop polling.
  */
 export function unsubscribe(): void {
   if (currentChannel) {
@@ -125,4 +258,16 @@ export function unsubscribe(): void {
     realtimeClient.close();
     realtimeClient = null;
   }
+  if (pollIntervalId !== null) {
+    clearInterval(pollIntervalId);
+    pollIntervalId = null;
+  }
+  usePolling = false;
+}
+
+/**
+ * Whether we're currently using polling instead of Ably.
+ */
+export function isPollingMode(): boolean {
+  return usePolling;
 }

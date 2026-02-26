@@ -4,8 +4,7 @@
 // Host starts the multiplayer game.
 
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { getSession } from '../_lib/sessionService';
-import { toClientQuestion } from '../_lib/types';
+import { startGame } from '../_lib/sessionService';
 import { publishToSession } from '../_lib/ablyService';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -24,47 +23,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(400).json({ error: 'playerId is required' });
     }
 
-    const session = getSession(sessionId);
-    if (!session) {
-      return res.status(404).json({ error: 'Session not found' });
-    }
-
-    // Verify the requester is the host
-    const player = session.players.find((p) => p.playerId === playerId);
-    if (!player || !player.isHost) {
-      return res.status(403).json({ error: 'Only the host can start the game' });
-    }
-
-    // Need at least 2 players
-    const connectedPlayers = session.players.filter((p) => p.connected);
-    if (connectedPlayers.length < 2) {
-      return res.status(400).json({ error: 'Need at least 2 players to start' });
-    }
-
-    if (session.status !== 'waiting') {
-      return res.status(400).json({ error: 'Game has already started' });
-    }
-
-    // Start the game
-    session.status = 'active';
-    session.currentQuestionIndex = 0;
-
-    const firstQuestion = toClientQuestion(session.questions[0]);
+    const result = startGame(sessionId, playerId);
 
     // Broadcast to all players
-    await publishToSession(sessionId, 'game_started', {
-      question: firstQuestion,
-      questionIndex: 0,
-      totalQuestions: session.questions.length,
-    });
+    await publishToSession(sessionId, 'game_started', result);
 
-    return res.status(200).json({
-      question: firstQuestion,
-      questionIndex: 0,
-      totalQuestions: session.questions.length,
-    });
+    return res.status(200).json(result);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    return res.status(500).json({ error: message });
+    if (message.includes('not found')) {
+      return res.status(404).json({ error: message });
+    }
+    if (message.includes('Only the host') || message.includes('Need at least')) {
+      return res.status(403).json({ error: message });
+    }
+    return res.status(400).json({ error: message });
   }
 }

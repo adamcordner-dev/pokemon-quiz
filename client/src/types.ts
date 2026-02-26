@@ -62,6 +62,7 @@ export interface SessionResults {
   players: PlayerInfo[];
   questions: ResultQuestion[];
   settings: GameSettings;
+  isMultiplayer: boolean;
 }
 
 export interface ResultQuestion {
@@ -76,4 +77,15 @@ export interface LobbyState {
   players: PlayerInfo[];
   settings: GameSettings;
   status: 'waiting' | 'active' | 'finished';
+}
+
+export interface PollResponse {
+  status: 'waiting' | 'active' | 'finished';
+  players: PlayerInfo[];
+  currentQuestion?: ClientQuestion;
+  questionIndex?: number;
+  totalQuestions?: number;
+  allAnswered?: boolean;
+  standings?: Array<{ playerId: string; name: string; score: number }>;
+  results?: SessionResults;
 }

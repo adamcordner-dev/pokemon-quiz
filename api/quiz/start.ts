@@ -23,8 +23,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     const qCount = questionCount ?? 10;
-    if (typeof qCount !== 'number' || qCount < 5 || qCount > 20) {
-      return res.status(400).json({ error: 'questionCount must be between 5 and 20' });
+    if (typeof qCount !== 'number' || qCount < 2 || qCount > 20) {
+      return res.status(400).json({ error: 'questionCount must be between 2 and 20' });
     }
 
     const timePQ = timePerQuestion ?? 15;
