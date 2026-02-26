@@ -32,7 +32,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(400).json({ error: 'timeRemaining must be >= 0' });
     }
 
-    const result = submitAnswer(
+    const result = await submitAnswer(
       sessionId,
       playerId,
       questionId,

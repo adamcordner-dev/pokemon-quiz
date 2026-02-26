@@ -23,7 +23,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(400).json({ error: 'playerId is required' });
     }
 
-    const result = startGame(sessionId, playerId);
+    const result = await startGame(sessionId, playerId);
 
     // Broadcast to all players
     await publishToSession(sessionId, 'game_started', result);

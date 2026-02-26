@@ -2,12 +2,9 @@
 // Session Service
 // ============================================
 // Manages game sessions: creation, joining, answering, results.
-// TODO: Replace with Upstash Redis for production (Phase 15).
+// Storage: Upstash Redis (production) with file-backed JSON fallback (local dev).
 
 import crypto from 'crypto';
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
 import {
   GameSession,
   GameSettings,
@@ -25,83 +22,49 @@ import {
 } from './types';
 import { generateQuestions } from './pokeApiService';
 import { calculateScore } from './scoringService';
+import { Redis } from '@upstash/redis';
 
-// --- File-backed session store ---
-// Vercel dev bundles each serverless function separately, so an in-memory
-// Map is NOT shared between endpoints. Instead we persist sessions to a
-// temp JSON file that all functions can read/write.
-// TODO: Replace with Upstash Redis for production (Phase 15).
+// --- Redis session store ---
+// Each session stored as  session:{sessionId}  with 1-hour TTL.
+// Room code → session ID mapping stored as  room:{roomCode}  with 1-hour TTL.
 
-const STORE_PATH = path.join(os.tmpdir(), 'pokemon-quiz-sessions.json');
-const LOCK_DIR = STORE_PATH + '.lock';
+const SESSION_TTL = 3600; // 1 hour in seconds
 
-// ---- Cross-process file lock (mkdir is atomic on all platforms) ----
+let redis: Redis | null = null;
 
-function acquireLock(): void {
-  const maxAttempts = 200;
-  const retryMs = 25;
-
-  for (let i = 0; i < maxAttempts; i++) {
-    try {
-      fs.mkdirSync(LOCK_DIR);
-      return; // lock acquired
-    } catch (err: any) {
-      if (err.code !== 'EEXIST') throw err;
-      // Check for stale lock (> 10 s)
-      try {
-        const stat = fs.statSync(LOCK_DIR);
-        if (Date.now() - stat.mtimeMs > 10_000) {
-          try { fs.rmdirSync(LOCK_DIR); } catch { /* already removed */ }
-          continue;
-        }
-      } catch {
-        continue; // lock was just released, retry immediately
-      }
-      // Busy-wait before retry
-      const end = Date.now() + retryMs;
-      while (Date.now() < end) { /* spin */ }
-    }
+function getRedis(): Redis {
+  if (redis) return redis;
+  const url = process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (!url || !token) {
+    throw new Error(
+      'UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN must be set'
+    );
   }
-  // Force-break stale lock as last resort
-  try { fs.rmdirSync(LOCK_DIR); } catch { /* ignore */ }
-  fs.mkdirSync(LOCK_DIR);
+  redis = new Redis({ url, token });
+  return redis;
 }
 
-function releaseLock(): void {
-  try { fs.rmdirSync(LOCK_DIR); } catch { /* ignore */ }
+// ---- Redis helpers ----
+
+async function getSessionFromRedis(sessionId: string): Promise<GameSession | null> {
+  const r = getRedis();
+  const data = await r.get<GameSession>(`session:${sessionId}`);
+  return data ?? null;
 }
 
-// ---- Session persistence ----
-
-function loadSessions(): Map<string, GameSession> {
-  try {
-    if (fs.existsSync(STORE_PATH)) {
-      const raw = fs.readFileSync(STORE_PATH, 'utf-8');
-      const entries: [string, GameSession][] = JSON.parse(raw);
-      return new Map(entries);
-    }
-  } catch {
-    // Corrupted file — start fresh
+async function saveSessionToRedis(session: GameSession): Promise<void> {
+  const r = getRedis();
+  await r.set(`session:${session.sessionId}`, session, { ex: SESSION_TTL });
+  // Keep room code mapping in sync
+  if (session.roomCode) {
+    await r.set(`room:${session.roomCode}`, session.sessionId, { ex: SESSION_TTL });
   }
-  return new Map();
 }
 
-function saveSessions(sessions: Map<string, GameSession>): void {
-  const entries = Array.from(sessions.entries());
-  fs.writeFileSync(STORE_PATH, JSON.stringify(entries), 'utf-8');
-}
-
-/** Helper: read → mutate → write with cross-process file lock */
-function withSessions<T>(fn: (sessions: Map<string, GameSession>) => T): T {
-  acquireLock();
-  try {
-    const sessions = loadSessions();
-    const result = fn(sessions);
-    saveSessions(sessions);
-    return result;
-  } finally {
-    releaseLock();
-  }
+async function getSessionIdByRoomCode(roomCode: string): Promise<string | null> {
+  const r = getRedis();
+  return await r.get<string>(`room:${roomCode}`);
 }
 
 /** Maximum players allowed in a multiplayer room. */
@@ -116,23 +79,20 @@ const ROOM_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
 /**
  * Generate a 4-character room code that isn't already in use.
+ * Checks Redis for existing room code keys.
  */
-function generateRoomCode(sessions: Map<string, GameSession>): string {
+async function generateRoomCode(): Promise<string> {
   const MAX_ATTEMPTS = 100;
-  const activeCodes = new Set<string>();
-
-  for (const session of sessions.values()) {
-    if (session.roomCode && session.status !== 'finished') {
-      activeCodes.add(session.roomCode);
-    }
-  }
+  const r = getRedis();
 
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     let code = '';
     for (let i = 0; i < 4; i++) {
       code += ROOM_CODE_CHARS[Math.floor(Math.random() * ROOM_CODE_CHARS.length)];
     }
-    if (!activeCodes.has(code)) {
+    // Check if this room code is already in use
+    const existing = await r.get(`room:${code}`);
+    if (!existing) {
       return code;
     }
   }
@@ -182,9 +142,7 @@ export async function createSinglePlayerSession(
     createdAt: Date.now(),
   };
 
-  withSessions((sessions) => {
-    sessions.set(sessionId, session);
-  });
+  await saveSessionToRedis(session);
 
   const clientQuestions: ClientQuestion[] = questions.map(toClientQuestion);
 
@@ -207,26 +165,22 @@ export async function createMultiplayerSession(
   const sessionId = crypto.randomUUID();
   const questions = await generateQuestions(settings);
   const player = createPlayer(playerName, true);
+  const roomCode = await generateRoomCode();
 
-  const roomCode = withSessions((sessions) => {
-    const code = generateRoomCode(sessions);
+  const session: GameSession = {
+    sessionId,
+    questions,
+    currentQuestionIndex: 0,
+    players: [player],
+    status: 'waiting',
+    roomCode,
+    isMultiplayer: true,
+    settings,
+    answeredQuestions: {},
+    createdAt: Date.now(),
+  };
 
-    const session: GameSession = {
-      sessionId,
-      questions,
-      currentQuestionIndex: 0,
-      players: [player],
-      status: 'waiting',
-      roomCode: code,
-      isMultiplayer: true,
-      settings,
-      answeredQuestions: {},
-      createdAt: Date.now(),
-    };
-
-    sessions.set(sessionId, session);
-    return code;
-  });
+  await saveSessionToRedis(session);
 
   return {
     sessionId,
@@ -242,46 +196,45 @@ export async function createMultiplayerSession(
 /**
  * Join an existing multiplayer session by room code.
  */
-export function joinMultiplayerSession(
+export async function joinMultiplayerSession(
   roomCode: string,
   playerName: string
-): MultiplayerJoinResponse {
-  return withSessions((sessions) => {
-    const upperCode = roomCode.toUpperCase();
+): Promise<MultiplayerJoinResponse> {
+  const upperCode = roomCode.toUpperCase();
 
-    let session: GameSession | undefined;
-    for (const s of sessions.values()) {
-      if (s.roomCode === upperCode && s.status === 'waiting') {
-        session = s;
-        break;
-      }
-    }
+  // Look up session ID from room code
+  const sessionId = await getSessionIdByRoomCode(upperCode);
+  if (!sessionId) {
+    throw new Error('Room not found');
+  }
 
-    if (!session) {
-      throw new Error('Room not found');
-    }
+  const session = await getSessionFromRedis(sessionId);
+  if (!session || session.status !== 'waiting') {
+    throw new Error('Room not found');
+  }
 
-    if (session.players.length >= MAX_PLAYERS) {
-      throw new Error('Room is full (max 20 players)');
-    }
+  if (session.players.length >= MAX_PLAYERS) {
+    throw new Error('Room is full (max 20 players)');
+  }
 
-    const nameTaken = session.players.some(
-      (p) => p.name.toLowerCase() === playerName.toLowerCase()
-    );
-    if (nameTaken) {
-      throw new Error('Name already taken');
-    }
+  const nameTaken = session.players.some(
+    (p) => p.name.toLowerCase() === playerName.toLowerCase()
+  );
+  if (nameTaken) {
+    throw new Error('Name already taken');
+  }
 
-    const player = createPlayer(playerName, false);
-    session.players.push(player);
+  const player = createPlayer(playerName, false);
+  session.players.push(player);
 
-    return {
-      sessionId: session.sessionId,
-      playerId: player.playerId,
-      players: session.players,
-      settings: session.settings,
-    };
-  });
+  await saveSessionToRedis(session);
+
+  return {
+    sessionId: session.sessionId,
+    playerId: player.playerId,
+    players: session.players,
+    settings: session.settings,
+  };
 }
 
 // ---------------------------------------------------------------
@@ -291,14 +244,9 @@ export function joinMultiplayerSession(
 /**
  * Retrieve a session by its ID.
  */
-export function getSession(sessionId: string): GameSession | undefined {
-  acquireLock();
-  try {
-    const sessions = loadSessions();
-    return sessions.get(sessionId);
-  } finally {
-    releaseLock();
-  }
+export async function getSession(sessionId: string): Promise<GameSession | undefined> {
+  const session = await getSessionFromRedis(sessionId);
+  return session ?? undefined;
 }
 
 // ---------------------------------------------------------------
@@ -309,125 +257,125 @@ export function getSession(sessionId: string): GameSession | undefined {
  * Start a multiplayer game. Sets status to 'active' and persists the change.
  * Only the host can call this, and there must be at least 2 connected players.
  */
-export function startGame(
+export async function startGame(
   sessionId: string,
   playerId: string
-): { question: ClientQuestion; questionIndex: number; totalQuestions: number } {
-  return withSessions((sessions) => {
-    const session = sessions.get(sessionId);
-    if (!session) {
-      throw new Error('Session not found');
-    }
+): Promise<{ question: ClientQuestion; questionIndex: number; totalQuestions: number }> {
+  const session = await getSessionFromRedis(sessionId);
+  if (!session) {
+    throw new Error('Session not found');
+  }
 
-    const player = session.players.find((p) => p.playerId === playerId);
-    if (!player || !player.isHost) {
-      throw new Error('Only the host can start the game');
-    }
+  const player = session.players.find((p) => p.playerId === playerId);
+  if (!player || !player.isHost) {
+    throw new Error('Only the host can start the game');
+  }
 
-    const connectedPlayers = session.players.filter((p) => p.connected);
-    if (connectedPlayers.length < 2) {
-      throw new Error('Need at least 2 players to start');
-    }
+  const connectedPlayers = session.players.filter((p) => p.connected);
+  if (connectedPlayers.length < 2) {
+    throw new Error('Need at least 2 players to start');
+  }
 
-    if (session.status !== 'waiting') {
-      throw new Error('Game has already started');
-    }
+  if (session.status !== 'waiting') {
+    throw new Error('Game has already started');
+  }
 
-    session.status = 'active';
-    session.currentQuestionIndex = 0;
+  session.status = 'active';
+  session.currentQuestionIndex = 0;
 
-    const firstQuestion = toClientQuestion(session.questions[0]);
-    return {
-      question: firstQuestion,
-      questionIndex: 0,
-      totalQuestions: session.questions.length,
-    };
-  });
+  await saveSessionToRedis(session);
+
+  const firstQuestion = toClientQuestion(session.questions[0]);
+  return {
+    question: firstQuestion,
+    questionIndex: 0,
+    totalQuestions: session.questions.length,
+  };
 }
 
 /**
  * Submit a player's answer for a question.
  * Validates the session, question, and player, then calculates the score.
  */
-export function submitAnswer(
+export async function submitAnswer(
   sessionId: string,
   playerId: string,
   questionId: string,
   selectedIndex: number,
   timeRemainingSeconds: number
-): AnswerResult {
-  return withSessions((sessions) => {
-    const session = sessions.get(sessionId);
-    if (!session) {
-      throw new Error('Session not found');
+): Promise<AnswerResult> {
+  const session = await getSessionFromRedis(sessionId);
+  if (!session) {
+    throw new Error('Session not found');
+  }
+  if (session.status !== 'active') {
+    throw new Error('Session is not active');
+  }
+
+  // Find the question
+  const question = session.questions.find((q) => q.questionId === questionId);
+  if (!question) {
+    throw new Error('Question not found');
+  }
+
+  // Anti-cheat: in multiplayer, only allow answering the current question
+  if (session.isMultiplayer) {
+    const currentQ = session.questions[session.currentQuestionIndex];
+    if (currentQ.questionId !== questionId) {
+      throw new Error('Cannot answer a question that is not the current one');
     }
-    if (session.status !== 'active') {
-      throw new Error('Session is not active');
-    }
+  }
 
-    // Find the question
-    const question = session.questions.find((q) => q.questionId === questionId);
-    if (!question) {
-      throw new Error('Question not found');
-    }
+  // Find the player
+  const player = session.players.find((p) => p.playerId === playerId);
+  if (!player) {
+    throw new Error('Player not found');
+  }
 
-    // Anti-cheat: in multiplayer, only allow answering the current question
-    if (session.isMultiplayer) {
-      const currentQ = session.questions[session.currentQuestionIndex];
-      if (currentQ.questionId !== questionId) {
-        throw new Error('Cannot answer a question that is not the current one');
-      }
-    }
+  // Check for duplicate answer
+  const questionAnswers = session.answeredQuestions[questionId];
+  if (questionAnswers && questionAnswers[playerId]) {
+    throw new Error('Already answered this question');
+  }
 
-    // Find the player
-    const player = session.players.find((p) => p.playerId === playerId);
-    if (!player) {
-      throw new Error('Player not found');
-    }
+  // Clamp timeRemaining to valid range (anti-cheat)
+  const clampedTime = Math.max(
+    0,
+    Math.min(timeRemainingSeconds, session.settings.timePerQuestion)
+  );
 
-    // Check for duplicate answer
-    const questionAnswers = session.answeredQuestions[questionId];
-    if (questionAnswers && questionAnswers[playerId]) {
-      throw new Error('Already answered this question');
-    }
+  // Determine correctness and calculate score
+  const correct = selectedIndex === question.correctIndex;
+  const pointsEarned = calculateScore(
+    correct,
+    clampedTime,
+    session.settings.timePerQuestion
+  );
 
-    // Clamp timeRemaining to valid range (anti-cheat)
-    const clampedTime = Math.max(
-      0,
-      Math.min(timeRemainingSeconds, session.settings.timePerQuestion)
-    );
+  // Record the answer
+  const playerAnswer: PlayerAnswer = {
+    selectedIndex,
+    correct,
+    pointsEarned,
+    timeRemaining: clampedTime,
+  };
 
-    // Determine correctness and calculate score
-    const correct = selectedIndex === question.correctIndex;
-    const pointsEarned = calculateScore(
-      correct,
-      clampedTime,
-      session.settings.timePerQuestion
-    );
+  if (!session.answeredQuestions[questionId]) {
+    session.answeredQuestions[questionId] = {};
+  }
+  session.answeredQuestions[questionId][playerId] = playerAnswer;
 
-    // Record the answer
-    const playerAnswer: PlayerAnswer = {
-      selectedIndex,
-      correct,
-      pointsEarned,
-      timeRemaining: clampedTime,
-    };
+  // Update player's total score
+  player.score += pointsEarned;
 
-    if (!session.answeredQuestions[questionId]) {
-      session.answeredQuestions[questionId] = {};
-    }
-    session.answeredQuestions[questionId][playerId] = playerAnswer;
+  await saveSessionToRedis(session);
 
-    // Update player's total score
-    player.score += pointsEarned;
-
-    return {
-      correct,
-      correctAnswer: question.correctName,
-      pointsEarned,
-      totalScore: player.score,
-    };
-  });
+  return {
+    correct,
+    correctAnswer: question.correctName,
+    pointsEarned,
+    totalScore: player.score,
+  };
 }
 
 /**
@@ -436,80 +384,80 @@ export function submitAnswer(
  * Eliminates the race condition where concurrent answers could clobber
  * each other via separate read-modify-write cycles.
  */
-export function submitMultiplayerAnswer(
+export async function submitMultiplayerAnswer(
   sessionId: string,
   playerId: string,
   questionId: string,
   selectedIndex: number,
   timeRemainingSeconds: number
-): MultiplayerAnswerResult {
-  return withSessions((sessions) => {
-    const session = sessions.get(sessionId);
-    if (!session) throw new Error('Session not found');
-    if (session.status !== 'active') throw new Error('Session is not active');
+): Promise<MultiplayerAnswerResult> {
+  const session = await getSessionFromRedis(sessionId);
+  if (!session) throw new Error('Session not found');
+  if (session.status !== 'active') throw new Error('Session is not active');
 
-    const question = session.questions.find((q) => q.questionId === questionId);
-    if (!question) throw new Error('Question not found');
+  const question = session.questions.find((q) => q.questionId === questionId);
+  if (!question) throw new Error('Question not found');
 
-    // Anti-cheat: only allow answering the current question
-    const currentQ = session.questions[session.currentQuestionIndex];
-    if (currentQ.questionId !== questionId) {
-      throw new Error('Cannot answer a question that is not the current one');
-    }
+  // Anti-cheat: only allow answering the current question
+  const currentQ = session.questions[session.currentQuestionIndex];
+  if (currentQ.questionId !== questionId) {
+    throw new Error('Cannot answer a question that is not the current one');
+  }
 
-    const player = session.players.find((p) => p.playerId === playerId);
-    if (!player) throw new Error('Player not found');
+  const player = session.players.find((p) => p.playerId === playerId);
+  if (!player) throw new Error('Player not found');
 
-    // Duplicate check
-    const existingAnswers = session.answeredQuestions[questionId];
-    if (existingAnswers && existingAnswers[playerId]) {
-      throw new Error('Already answered this question');
-    }
+  // Duplicate check
+  const existingAnswers = session.answeredQuestions[questionId];
+  if (existingAnswers && existingAnswers[playerId]) {
+    throw new Error('Already answered this question');
+  }
 
-    // Clamp time (anti-cheat)
-    const clampedTime = Math.max(
-      0,
-      Math.min(timeRemainingSeconds, session.settings.timePerQuestion)
-    );
+  // Clamp time (anti-cheat)
+  const clampedTime = Math.max(
+    0,
+    Math.min(timeRemainingSeconds, session.settings.timePerQuestion)
+  );
 
-    const correct = selectedIndex === question.correctIndex;
-    const pointsEarned = calculateScore(
-      correct,
-      clampedTime,
-      session.settings.timePerQuestion
-    );
+  const correct = selectedIndex === question.correctIndex;
+  const pointsEarned = calculateScore(
+    correct,
+    clampedTime,
+    session.settings.timePerQuestion
+  );
 
-    // Record answer
-    const playerAnswer: PlayerAnswer = {
-      selectedIndex,
-      correct,
-      pointsEarned,
-      timeRemaining: clampedTime,
-    };
-    if (!session.answeredQuestions[questionId]) {
-      session.answeredQuestions[questionId] = {};
-    }
-    session.answeredQuestions[questionId][playerId] = playerAnswer;
-    player.score += pointsEarned;
+  // Record answer
+  const playerAnswer: PlayerAnswer = {
+    selectedIndex,
+    correct,
+    pointsEarned,
+    timeRemaining: clampedTime,
+  };
+  if (!session.answeredQuestions[questionId]) {
+    session.answeredQuestions[questionId] = {};
+  }
+  session.answeredQuestions[questionId][playerId] = playerAnswer;
+  player.score += pointsEarned;
 
-    // Check if all connected players have answered (within same lock)
-    const questionAnswers = session.answeredQuestions[questionId];
-    const connectedPlayers = session.players.filter((p) => p.connected);
-    const allDone = connectedPlayers.every(
-      (p) => questionAnswers[p.playerId] !== undefined
-    );
+  // Check if all connected players have answered
+  const questionAnswers = session.answeredQuestions[questionId];
+  const connectedPlayers = session.players.filter((p) => p.connected);
+  const allDone = connectedPlayers.every(
+    (p) => questionAnswers[p.playerId] !== undefined
+  );
 
-    return {
-      correct,
-      correctAnswer: question.correctName,
-      pointsEarned,
-      totalScore: player.score,
-      playerName: player.name,
-      allAnswered: allDone,
-      standings: [...session.players].sort((a, b) => b.score - a.score),
-      questionResults: questionAnswers,
-    };
-  });
+  await saveSessionToRedis(session);
+
+  return {
+    correct,
+    correctAnswer: question.correctName,
+    pointsEarned,
+    totalScore: player.score,
+    playerName: player.name,
+    allAnswered: allDone,
+    standings: [...session.players].sort((a, b) => b.score - a.score),
+    questionResults: questionAnswers,
+  };
 }
 
 // ---------------------------------------------------------------
@@ -519,45 +467,39 @@ export function submitMultiplayerAnswer(
 /**
  * Check whether all connected players have answered a given question.
  */
-export function allPlayersAnswered(
+export async function allPlayersAnswered(
   sessionId: string,
   questionId: string
-): boolean {
-  acquireLock();
-  try {
-    const sessions = loadSessions();
-    const session = sessions.get(sessionId);
-    if (!session) return false;
+): Promise<boolean> {
+  const session = await getSessionFromRedis(sessionId);
+  if (!session) return false;
 
-    const questionAnswers = session.answeredQuestions[questionId] ?? {};
-    const connectedPlayers = session.players.filter((p) => p.connected);
+  const questionAnswers = session.answeredQuestions[questionId] ?? {};
+  const connectedPlayers = session.players.filter((p) => p.connected);
 
-    return connectedPlayers.every((p) => questionAnswers[p.playerId] !== undefined);
-  } finally {
-    releaseLock();
-  }
+  return connectedPlayers.every((p) => questionAnswers[p.playerId] !== undefined);
 }
 
 /**
  * Advance to the next question. Returns the new ClientQuestion,
  * or null if the quiz is finished.
  */
-export function advanceQuestion(sessionId: string): ClientQuestion | null {
-  return withSessions((sessions) => {
-    const session = sessions.get(sessionId);
-    if (!session) {
-      throw new Error('Session not found');
-    }
+export async function advanceQuestion(sessionId: string): Promise<ClientQuestion | null> {
+  const session = await getSessionFromRedis(sessionId);
+  if (!session) {
+    throw new Error('Session not found');
+  }
 
-    session.currentQuestionIndex++;
+  session.currentQuestionIndex++;
 
-    if (session.currentQuestionIndex >= session.questions.length) {
-      session.status = 'finished';
-      return null;
-    }
+  if (session.currentQuestionIndex >= session.questions.length) {
+    session.status = 'finished';
+    await saveSessionToRedis(session);
+    return null;
+  }
 
-    return toClientQuestion(session.questions[session.currentQuestionIndex]);
-  });
+  await saveSessionToRedis(session);
+  return toClientQuestion(session.questions[session.currentQuestionIndex]);
 }
 
 // ---------------------------------------------------------------
@@ -568,9 +510,8 @@ export function advanceQuestion(sessionId: string): ClientQuestion | null {
  * Build the final results for a session.
  * Players are sorted by score descending.
  */
-export function getResults(sessionId: string): SessionResults {
-  const sessions = loadSessions();
-  const session = sessions.get(sessionId);
+export async function getResults(sessionId: string): Promise<SessionResults> {
+  const session = await getSessionFromRedis(sessionId);
   if (!session) {
     throw new Error('Session not found');
   }
@@ -604,25 +545,25 @@ export function getResults(sessionId: string): SessionResults {
  * Mark a player as disconnected. If they were the host,
  * transfer host status to the next connected player.
  */
-export function removePlayer(sessionId: string, playerId: string): void {
-  withSessions((sessions) => {
-    const session = sessions.get(sessionId);
-    if (!session) return;
+export async function removePlayer(sessionId: string, playerId: string): Promise<void> {
+  const session = await getSessionFromRedis(sessionId);
+  if (!session) return;
 
-    const player = session.players.find((p) => p.playerId === playerId);
-    if (!player) return;
+  const player = session.players.find((p) => p.playerId === playerId);
+  if (!player) return;
 
-    player.connected = false;
+  player.connected = false;
 
-    // Transfer host if needed
-    if (player.isHost) {
-      player.isHost = false;
-      const nextHost = session.players.find(
-        (p) => p.connected && p.playerId !== playerId
-      );
-      if (nextHost) {
-        nextHost.isHost = true;
-      }
+  // Transfer host if needed
+  if (player.isHost) {
+    player.isHost = false;
+    const nextHost = session.players.find(
+      (p) => p.connected && p.playerId !== playerId
+    );
+    if (nextHost) {
+      nextHost.isHost = true;
     }
-  });
+  }
+
+  await saveSessionToRedis(session);
 }

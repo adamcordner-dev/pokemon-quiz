@@ -33,7 +33,7 @@ interface PollResponse {
   results?: SessionResults;
 }
 
-export default function handler(req: VercelRequest, res: VercelResponse) {
+export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'GET') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
@@ -45,7 +45,7 @@ export default function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(400).json({ error: 'sessionId is required' });
     }
 
-    const session = getSession(sessionId);
+    const session = await getSession(sessionId);
     if (!session) {
       return res.status(404).json({ error: 'Session not found' });
     }
@@ -68,7 +68,7 @@ export default function handler(req: VercelRequest, res: VercelResponse) {
       response.currentQuestion = toClientQuestion(currentQ);
       response.questionIndex = session.currentQuestionIndex;
       response.totalQuestions = session.questions.length;
-      response.allAnswered = allPlayersAnswered(sessionId, questionId);
+      response.allAnswered = await allPlayersAnswered(sessionId, questionId);
       response.standings = [...session.players]
         .sort((a, b) => b.score - a.score)
         .map((p) => ({
@@ -79,7 +79,7 @@ export default function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     if (session.status === 'finished') {
-      response.results = getResults(sessionId);
+      response.results = await getResults(sessionId);
     }
 
     // No-cache headers to prevent stale poll data

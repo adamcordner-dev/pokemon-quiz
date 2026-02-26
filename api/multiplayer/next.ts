@@ -23,7 +23,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(400).json({ error: 'playerId is required' });
     }
 
-    const session = getSession(sessionId);
+    const session = await getSession(sessionId);
     if (!session) {
       return res.status(404).json({ error: 'Session not found' });
     }
@@ -34,17 +34,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(403).json({ error: 'Only the host can advance questions' });
     }
 
-    const nextQuestion = advanceQuestion(sessionId);
+    const nextQuestion = await advanceQuestion(sessionId);
 
     if (nextQuestion === null) {
       // Game is over
-      const results = getResults(sessionId);
+      const results = await getResults(sessionId);
       await publishToSession(sessionId, 'game_over', { results });
       return res.status(200).json({ finished: true, results });
     }
 
     // Re-read session to get the updated currentQuestionIndex
-    const updatedSession = getSession(sessionId)!;
+    const updatedSession = (await getSession(sessionId))!;
 
     // Broadcast next question
     await publishToSession(sessionId, 'next_question', {

@@ -26,7 +26,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(400).json({ error: 'playerName must be 35 characters or fewer' });
     }
 
-    const result = joinMultiplayerSession(roomCode.trim(), playerName.trim());
+    const result = await joinMultiplayerSession(roomCode.trim(), playerName.trim());
 
     // Notify other players in the room
     await publishToSession(result.sessionId, 'player_joined', {

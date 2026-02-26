@@ -36,7 +36,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     // Single atomic operation: submit + check all answered + gather standings
-    const result = submitMultiplayerAnswer(
+    const result = await submitMultiplayerAnswer(
       sessionId,
       playerId,
       questionId,

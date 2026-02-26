@@ -2,7 +2,7 @@
 // Ably Service
 // ============================================
 // Server-side Ably publishing for real-time multiplayer events.
-// TODO: Ably will be fully configured in Phase 15 (deployment).
+// In production, ABLY_API_KEY must be set.
 // For local development, publishing is a no-op if ABLY_API_KEY is not set.
 
 import Ably from 'ably';
@@ -11,14 +11,17 @@ let ablyClient: Ably.Rest | null = null;
 
 /**
  * Get or create the Ably REST client.
- * Returns null if ABLY_API_KEY is not configured (local dev without Ably).
+ * Returns null if ABLY_API_KEY is not configured (local dev only).
  */
 function getAblyClient(): Ably.Rest | null {
   if (ablyClient) return ablyClient;
 
   const apiKey = process.env.ABLY_API_KEY;
   if (!apiKey) {
-    console.warn('[Ably] ABLY_API_KEY not set — real-time events disabled.');
+    // In production this should never happen; in local dev, allow graceful degradation
+    if (process.env.VERCEL_ENV) {
+      console.error('[Ably] ABLY_API_KEY not set in production!');
+    }
     return null;
   }
 

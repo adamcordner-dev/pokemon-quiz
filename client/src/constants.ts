@@ -3,7 +3,7 @@
 // ============================================
 
 export const DEFAULT_QUESTION_COUNT = 10;
-export const MIN_QUESTION_COUNT = 2;
+export const MIN_QUESTION_COUNT = 5;
 export const MAX_QUESTION_COUNT = 20;
 
 export const DEFAULT_TIME_PER_QUESTION = 15;
