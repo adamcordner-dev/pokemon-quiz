@@ -10,7 +10,7 @@ import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useQuiz } from '../../hooks/useQuiz';
 import { useMultiplayer } from '../../hooks/useMultiplayer';
 import { useTimer } from '../../hooks/useTimer';
-import type { ClientQuestion, GameSettings, PlayerInfo } from '../../types';
+import type { ClientQuestion, GameSettings } from '../../types';
 import ProgressIndicator from './ProgressIndicator';
 import TimerBar from './TimerBar';
 import ScoreDisplay from './ScoreDisplay';

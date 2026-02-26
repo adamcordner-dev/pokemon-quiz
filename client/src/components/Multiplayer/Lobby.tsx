@@ -2,7 +2,7 @@
 // Lobby — waiting room before multiplayer game starts
 // ============================================
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import * as apiClient from '../../services/apiClient';
 import {
@@ -13,7 +13,7 @@ import {
   type PlayerDisconnectedEvent,
   type HostChangedEvent,
 } from '../../services/realtimeClient';
-import type { PlayerInfo, GameSettings, ClientQuestion } from '../../types';
+import type { PlayerInfo, GameSettings } from '../../types';
 import LoadingSpinner from '../Shared/LoadingSpinner';
 
 interface LocationState {
