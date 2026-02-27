@@ -206,4 +206,5 @@ This project is a fan-made quiz for educational and entertainment purposes. It i
 
 - Pokémon names, images, and data are provided by [PokéAPI](https://pokeapi.co/), which sources them from the Pokémon games. All Pokémon-related content is © Nintendo / Creatures Inc. / Game Freak.
 - PokéAPI is a free, open-source API. This project respects its fair use policy and caches data where possible to minimise API load.
+- This project was built with the assistance of AI (GitHub Copilot). All code was reviewed and tested by the developer.
 - This project is open source and generates no revenue.

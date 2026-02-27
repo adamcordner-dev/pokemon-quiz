@@ -242,7 +242,7 @@ export default function Results() {
         </div>
         <a
           className="feedback-link"
-          href="mailto:placeholder@example.com?subject=Pokemon%20Quiz%20Feedback"
+          href="mailto:pokemonquiz.feedback@gmail.com?subject=Pokemon%20Quiz%20Feedback"
         >
           Send Feedback
         </a>

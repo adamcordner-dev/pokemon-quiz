@@ -16,7 +16,9 @@ export function useTimer({ totalSeconds, onExpire, isPaused }: UseTimerParams) {
   const onExpireRef = useRef(onExpire);
 
   // Always keep the callback ref up-to-date (avoids stale closures)
-  onExpireRef.current = onExpire;
+  useEffect(() => {
+    onExpireRef.current = onExpire;
+  }, [onExpire]);
 
   // Reset when totalSeconds changes (new question)
   useEffect(() => {
