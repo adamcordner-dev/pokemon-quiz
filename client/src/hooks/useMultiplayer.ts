@@ -75,12 +75,21 @@ export function useMultiplayer({
       onAnswerResult: (data: AnswerResultEvent) => {
         answeredPlayersRef.current.add(data.playerId);
         setAnsweredPlayers(new Set(answeredPlayersRef.current));
+        console.log(
+          `[Multiplayer] ${data.playerName} answered. Total answered: ${answeredPlayersRef.current.size}`
+        );
       },
       onAllAnswered: (data: AllAnsweredEvent) => {
+        console.log(
+          `[Multiplayer] All answered event received. Players count: ${data.standings?.length ?? 0}`,
+          'Standing data:',
+          data.standings
+        );
         setAllAnswered(true);
         setPlayers(data.standings);
       },
       onNextQuestion: (data: NextQuestionEvent) => {
+        console.log(`[Multiplayer] Moving to Q${data.questionIndex + 1}`);
         setCurrentQuestion(data.question);
         setQuestionIndex(data.questionIndex);
         setAnswered(false);
@@ -93,16 +102,23 @@ export function useMultiplayer({
         setAnsweredPlayers(new Set());
       },
       onGameOver: (data: GameOverEvent) => {
+        console.log('[Multiplayer] Game over');
         setIsFinished(true);
         setResults(data.results);
       },
       onHostChanged: (data: HostChangedEvent) => {
+        console.log(
+          `[Multiplayer] Host changed to ${data.newHostId}. Players: ${data.players.length}`
+        );
         setPlayers(data.players);
         if (data.newHostId === playerId) {
           setIsHost(true);
         }
       },
       onPlayerDisconnected: (data: PlayerDisconnectedEvent) => {
+        console.log(
+          `[Multiplayer] ${data.playerId} disconnected. Remaining: ${data.players.length}`
+        );
         setPlayers(data.players);
       },
     });

@@ -328,6 +328,7 @@ function MultiplayerGameInner({
           <p className="hint-text">Waiting for other players…</p>
           <div className="answered-indicator">
             {mp.answeredPlayers.size} / {mp.players.filter((p) => p.connected).length} answered
+            {mp.players.length === 0 && ' (no players loaded)'}
           </div>
         </div>
       );

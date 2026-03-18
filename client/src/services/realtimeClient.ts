@@ -231,11 +231,12 @@ function startPolling(sessionId: string, handlers: SessionHandlers): void {
         if (
           curr.status === 'active' &&
           curr.allAnswered &&
-          !prev.allAnswered &&
-          curr.standings
+          !prev.allAnswered
         ) {
+          // Use full players array (which has connected status) sorted by score
+          const standings = [...curr.players].sort((a, b) => b.score - a.score);
           handlers.onAllAnswered?.({
-            standings: curr.players,
+            standings,
             questionResults: {},
           });
         }
