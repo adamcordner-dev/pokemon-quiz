@@ -78,6 +78,7 @@ let realtimeClient: Ably.Realtime | null = null;
 let currentChannel: Ably.RealtimeChannel | null = null;
 let pollIntervalId: ReturnType<typeof setInterval> | null = null;
 let usePolling = false;
+let ablyConnectionestablished = false;
 
 // ---------------------------------------------------------------
 // Ably Mode
@@ -88,20 +89,54 @@ async function initAbly(): Promise<boolean> {
     // Check if Ably auth is available
     const res = await fetch('/api/ably-auth');
     if (res.status === 501) {
-      // Server says Ably not configured — use polling
+      console.warn(
+        '[Realtime] Ably not configured (ABLY_API_KEY missing) — falling back to polling'
+      );
       return false;
     }
-    if (!res.ok) return false;
+    if (!res.ok) {
+      console.warn(
+        `[Realtime] Ably auth request failed (${res.status}) — falling back to polling`
+      );
+      return false;
+    }
 
     realtimeClient = new Ably.Realtime({ authUrl: '/api/ably-auth' });
-    return true;
-  } catch {
+
+    // Wait for connection with a timeout
+    return await new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        console.warn(
+          '[Realtime] Ably connection timeout (5s) — falling back to polling'
+        );
+        resolve(false);
+      }, 5000);
+
+      realtimeClient!.connection.on('connected', () => {
+        clearTimeout(timeout);
+        ablyConnectionestablished = true;
+        console.log('[Realtime] Ably connected successfully');
+        resolve(true);
+      });
+
+      realtimeClient!.connection.on('failed', () => {
+        clearTimeout(timeout);
+        console.warn('[Realtime] Ably connection failed — falling back to polling');
+        resolve(false);
+      });
+    });
+  } catch (err) {
+    console.warn(
+      '[Realtime] Ably initialization error:',
+      err instanceof Error ? err.message : String(err),
+      '— falling back to polling'
+    );
     return false;
   }
 }
 
 function subscribeAbly(sessionId: string, handlers: SessionHandlers): void {
-  if (!realtimeClient) return;
+  if (!realtimeClient || !ablyConnectionestablished) return;
 
   const channel = realtimeClient.channels.get(`game:${sessionId}`);
   currentChannel = channel;
@@ -124,6 +159,8 @@ function subscribeAbly(sessionId: string, handlers: SessionHandlers): void {
       });
     }
   }
+
+  console.log(`[Realtime] Ably subscribed to session ${sessionId}`);
 }
 
 // ---------------------------------------------------------------
@@ -215,9 +252,10 @@ function startPolling(sessionId: string, handlers: SessionHandlers): void {
     }
   }
 
+  console.log(`[Realtime] Polling started for session ${sessionId} (500ms interval)`);
   // First poll immediately
   doPoll();
-  pollIntervalId = setInterval(doPoll, 1000);
+  pollIntervalId = setInterval(doPoll, 500);
 }
 
 // ---------------------------------------------------------------
@@ -239,9 +277,11 @@ export async function subscribeToSession(
 
   if (ablyAvailable) {
     usePolling = false;
+    console.log('[Realtime] Using Ably for real-time updates');
     subscribeAbly(sessionId, handlers);
   } else {
     usePolling = true;
+    console.warn('[Realtime] Using polling fallback (faster 500ms intervals)');
     startPolling(sessionId, handlers);
   }
 }
